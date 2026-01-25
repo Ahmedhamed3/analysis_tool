@@ -20,7 +20,6 @@ NETWORK_ACTIVITY_OPEN_ID = 1
 NETWORK_ACTIVITY_OPEN_TYPE_UID = 400101
 FILE_SYSTEM_ACTIVITY_CLASS_UID = 1001
 FILE_SYSTEM_ACTIVITY_CREATE_ID = 1
-FILE_SYSTEM_ACTIVITY_CREATE_TYPE_UID = 100101
 
 def _basename(path: Optional[str]) -> Optional[str]:
     if not path:
@@ -166,14 +165,18 @@ def map_sysmon_eventid11_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any
     if ev.event_id != 11:
         return None
 
+    type_uid = calc_type_uid(FILE_SYSTEM_ACTIVITY_CLASS_UID, FILE_SYSTEM_ACTIVITY_CREATE_ID)
+
     actor: Dict[str, Any] = {}
     process: Dict[str, Any] = {}
     if ev.image:
-        process["name"] = ev.image
+        process["executable"] = ev.image
     if ev.pid is not None:
         process["pid"] = ev.pid
     if process:
         actor["process"] = process
+    if ev.user:
+        actor["user"] = {"name": ev.user}
 
     file_obj: Dict[str, Any] = {}
     if ev.target_filename:
@@ -197,7 +200,7 @@ def map_sysmon_eventid11_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any
         "activity_id": FILE_SYSTEM_ACTIVITY_CREATE_ID,
         "category_uid": CATEGORY_UID_SYSTEM,
         "class_uid": FILE_SYSTEM_ACTIVITY_CLASS_UID,
-        "type_uid": FILE_SYSTEM_ACTIVITY_CREATE_TYPE_UID,
+        "type_uid": type_uid,
         "time": ev.ts,
         "severity_id": DEFAULT_SEVERITY_ID,
         "metadata": {

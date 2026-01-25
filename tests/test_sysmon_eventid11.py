@@ -31,5 +31,5 @@ def test_eventid11_maps_to_file_create(tmp_path):
     assert out["type_uid"] == 100101
     assert out["time"] == "2024-03-04T05:06:07.890000Z"
     assert out["file"]["path"] == "C:\\Temp\\created.txt"
-    assert out["actor"]["process"]["name"] == "C:\\Windows\\System32\\notepad.exe"
+    assert out["actor"]["process"]["executable"] == "C:\\Windows\\System32\\notepad.exe"
     assert out["actor"]["process"]["pid"] == 9876
