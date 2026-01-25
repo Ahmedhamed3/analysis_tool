@@ -10,12 +10,14 @@ def test_eventid11_maps_to_file_create(tmp_path):
             "EventID": 11,
             "UtcTime": "2024-03-04 05:06:07.890",
             "ProcessGuid": "{11111111-2222-3333-4444-555555555555}",
-            "ProcessId": 9876,
-            "Image": "C:\\Windows\\System32\\notepad.exe",
-            "TargetFilename": "C:\\Temp\\created.txt",
             "CreationUtcTime": "2024-03-04 05:06:07.891",
             "User": "CONTOSO\\writer",
             "RuleName": "FileCreateRule",
+            "EventData": {
+                "ProcessId": "5480",
+                "Image": "C:\\Windows\\System32\\notepad.exe",
+                "TargetFilename": "C:\\Temp\\created.txt",
+            },
         }
     ]
     path = tmp_path / "sysmon.json"
@@ -32,4 +34,4 @@ def test_eventid11_maps_to_file_create(tmp_path):
     assert out["time"] == "2024-03-04T05:06:07.890000Z"
     assert out["file"]["path"] == "C:\\Temp\\created.txt"
     assert out["actor"]["process"]["executable"] == "C:\\Windows\\System32\\notepad.exe"
-    assert out["actor"]["process"]["pid"] == 9876
+    assert out["actor"]["process"]["pid"] == 5480

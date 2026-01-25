@@ -26,6 +26,22 @@ def _basename(path: Optional[str]) -> Optional[str]:
         return None
     return os.path.basename(path)
 
+def _safe_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+def _event_data_value(event_data: Optional[Dict[str, Any]], key: str) -> Optional[Any]:
+    if not event_data:
+        return None
+    nested = event_data.get("EventData")
+    if isinstance(nested, dict) and key in nested:
+        return nested.get(key)
+    return event_data.get(key)
+
 def map_sysmon_eventid1_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]]:
     """
     Maps ONLY Sysmon EventID 1 (Process Create) -> OCSF process_activity Launch.
@@ -167,21 +183,26 @@ def map_sysmon_eventid11_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any
 
     type_uid = calc_type_uid(FILE_SYSTEM_ACTIVITY_CLASS_UID, FILE_SYSTEM_ACTIVITY_CREATE_ID)
 
+    target_filename = _event_data_value(ev.event_data, "TargetFilename") or ev.target_filename
+    image = _event_data_value(ev.event_data, "Image") or ev.image
+    process_id = _event_data_value(ev.event_data, "ProcessId") or ev.pid
+
     actor: Dict[str, Any] = {}
     process: Dict[str, Any] = {}
-    if ev.image:
-        process["executable"] = ev.image
-    if ev.pid is not None:
-        process["pid"] = ev.pid
+    if image:
+        process["executable"] = image
+    pid = _safe_int(process_id)
+    if pid is not None:
+        process["pid"] = pid
     if process:
         actor["process"] = process
     if ev.user:
         actor["user"] = {"name": ev.user}
 
     file_obj: Dict[str, Any] = {}
-    if ev.target_filename:
-        file_obj["path"] = ev.target_filename
-        file_obj["name"] = _basename(ev.target_filename) or ev.target_filename
+    if target_filename:
+        file_obj["path"] = target_filename
+        file_obj["name"] = _basename(target_filename) or target_filename
         file_obj["type_id"] = DEFAULT_FILE_TYPE_ID
 
     unmapped: Dict[str, Any] = {}
