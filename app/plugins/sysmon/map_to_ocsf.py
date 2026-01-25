@@ -14,6 +14,11 @@ from app.ocsf.constants import (
 )
 from app.plugins.sysmon.parse import SysmonNormalized
 
+NETWORK_CATEGORY_UID = 4
+NETWORK_ACTIVITY_CLASS_UID = 4001
+NETWORK_ACTIVITY_OPEN_ID = 1
+NETWORK_ACTIVITY_OPEN_TYPE_UID = 400101
+
 def _basename(path: Optional[str]) -> Optional[str]:
     if not path:
         return None
@@ -91,5 +96,60 @@ def map_sysmon_eventid1_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]
         "device": device,
         "process": process,
     }
+
+    return ocsf_event
+
+def map_sysmon_eventid3_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]]:
+    """
+    Maps ONLY Sysmon EventID 3 (Network Connect) -> OCSF network activity Open.
+    Returns None if event is not EventID 3.
+    """
+    if ev.event_id != 3:
+        return None
+
+    actor: Dict[str, Any] = {}
+    if ev.user:
+        actor["user"] = {"name": ev.user}
+
+    device: Dict[str, Any] = {"type_id": DEFAULT_DEVICE_TYPE_ID}
+    if ev.host:
+        device["hostname"] = ev.host
+
+    network: Dict[str, Any] = {}
+    if ev.src_ip or ev.src_port is not None:
+        src: Dict[str, Any] = {}
+        if ev.src_ip:
+            src["ip"] = ev.src_ip
+        if ev.src_port is not None:
+            src["port"] = ev.src_port
+        network["src_endpoint"] = src
+    if ev.dst_ip or ev.dst_port is not None:
+        dst: Dict[str, Any] = {}
+        if ev.dst_ip:
+            dst["ip"] = ev.dst_ip
+        if ev.dst_port is not None:
+            dst["port"] = ev.dst_port
+        network["dst_endpoint"] = dst
+
+    if ev.protocol:
+        network["protocol"] = ev.protocol
+
+    ocsf_event: Dict[str, Any] = {
+        "activity_id": NETWORK_ACTIVITY_OPEN_ID,
+        "category_uid": NETWORK_CATEGORY_UID,
+        "class_uid": NETWORK_ACTIVITY_CLASS_UID,
+        "type_uid": NETWORK_ACTIVITY_OPEN_TYPE_UID,
+        "time": ev.ts,
+        "severity_id": DEFAULT_SEVERITY_ID,
+        "metadata": {
+            "product": DEFAULT_METADATA_PRODUCT,
+            "version": DEFAULT_METADATA_VERSION,
+        },
+        "actor": actor if actor else {"app_name": "unknown"},
+        "device": device,
+    }
+
+    if network:
+        ocsf_event["network"] = network
 
     return ocsf_event
