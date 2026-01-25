@@ -93,15 +93,15 @@ def iter_sysmon_events(file_path: str) -> Iterator[SysmonNormalized]:
       - JSON array file
       - JSONL (one object per line)
     """
-    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as f:
         first = f.readline().strip()
 
     if not first:
-        return iter(())
+        return
 
     # JSON array
     if first.startswith("["):
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as f:
             data = json.load(f)
         for ev in data:
             if isinstance(ev, dict):
@@ -110,7 +110,7 @@ def iter_sysmon_events(file_path: str) -> Iterator[SysmonNormalized]:
 
     # JSONL
     def _gen() -> Iterator[SysmonNormalized]:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as f:
             for line in f:
                 line = line.strip()
                 if not line:

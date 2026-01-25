@@ -10,7 +10,7 @@ def detect_sysmon_json(file_path: str) -> bool:
         return False
 
     # Read small sample
-    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as f:
         first = f.readline().strip()
 
 
