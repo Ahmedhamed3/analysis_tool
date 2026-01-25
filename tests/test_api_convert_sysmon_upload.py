@@ -29,6 +29,15 @@ def test_convert_sysmon_upload_json_array_mixed_events():
             "DestinationPort": 443,
             "Protocol": "tcp",
         },
+        {
+            "EventID": 11,
+            "UtcTime": "2024-01-01 00:00:01.500",
+            "Computer": "host1",
+            "User": "user1",
+            "ProcessId": 5555,
+            "Image": "C:\\Windows\\System32\\notepad.exe",
+            "TargetFilename": "C:\\Temp\\created.txt",
+        },
         {"EventID": 99, "UtcTime": "2024-01-01 00:00:02.000"},
     ]
 
@@ -46,10 +55,11 @@ def test_convert_sysmon_upload_json_array_mixed_events():
     assert response.headers["content-type"].startswith("application/x-ndjson")
 
     lines = [line for line in response.text.splitlines() if line.strip()]
-    assert len(lines) == 2
+    assert len(lines) == 3
 
     events = [json.loads(line) for line in lines]
     type_pairs = {(event["class_uid"], event["type_uid"]) for event in events}
 
     assert (7, 701) in type_pairs
     assert (4001, 400101) in type_pairs
+    assert (1001, 100101) in type_pairs

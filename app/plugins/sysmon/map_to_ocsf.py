@@ -18,6 +18,9 @@ NETWORK_CATEGORY_UID = 4
 NETWORK_ACTIVITY_CLASS_UID = 4001
 NETWORK_ACTIVITY_OPEN_ID = 1
 NETWORK_ACTIVITY_OPEN_TYPE_UID = 400101
+FILE_SYSTEM_ACTIVITY_CLASS_UID = 1001
+FILE_SYSTEM_ACTIVITY_CREATE_ID = 1
+FILE_SYSTEM_ACTIVITY_CREATE_TYPE_UID = 100101
 
 def _basename(path: Optional[str]) -> Optional[str]:
     if not path:
@@ -151,5 +154,62 @@ def map_sysmon_eventid3_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]
 
     if network:
         ocsf_event["network"] = network
+
+    return ocsf_event
+
+
+def map_sysmon_eventid11_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]]:
+    """
+    Maps ONLY Sysmon EventID 11 (File Create) -> OCSF File System Activity Create.
+    Returns None if event is not EventID 11.
+    """
+    if ev.event_id != 11:
+        return None
+
+    actor: Dict[str, Any] = {}
+    process: Dict[str, Any] = {}
+    if ev.image:
+        process["name"] = ev.image
+    if ev.pid is not None:
+        process["pid"] = ev.pid
+    if process:
+        actor["process"] = process
+
+    file_obj: Dict[str, Any] = {}
+    if ev.target_filename:
+        file_obj["path"] = ev.target_filename
+        file_obj["name"] = _basename(ev.target_filename) or ev.target_filename
+        file_obj["type_id"] = DEFAULT_FILE_TYPE_ID
+
+    unmapped: Dict[str, Any] = {}
+    if ev.process_guid:
+        unmapped["process_guid"] = ev.process_guid
+    if ev.rule_name:
+        unmapped["rule_name"] = ev.rule_name
+    if ev.user:
+        unmapped["user"] = ev.user
+    if ev.creation_utctime:
+        unmapped["creation_utctime"] = ev.creation_utctime
+    if ev.event_data:
+        unmapped["original_event"] = ev.event_data
+
+    ocsf_event: Dict[str, Any] = {
+        "activity_id": FILE_SYSTEM_ACTIVITY_CREATE_ID,
+        "category_uid": CATEGORY_UID_SYSTEM,
+        "class_uid": FILE_SYSTEM_ACTIVITY_CLASS_UID,
+        "type_uid": FILE_SYSTEM_ACTIVITY_CREATE_TYPE_UID,
+        "time": ev.ts,
+        "severity_id": DEFAULT_SEVERITY_ID,
+        "metadata": {
+            "product": DEFAULT_METADATA_PRODUCT,
+            "version": DEFAULT_METADATA_VERSION,
+        },
+        "actor": actor if actor else {"app_name": "unknown"},
+    }
+
+    if file_obj:
+        ocsf_event["file"] = file_obj
+    if unmapped:
+        ocsf_event["unmapped"] = unmapped
 
     return ocsf_event

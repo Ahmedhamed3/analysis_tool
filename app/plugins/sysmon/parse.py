@@ -20,6 +20,11 @@ class SysmonNormalized:
     dst_ip: Optional[str] = None
     dst_port: Optional[int] = None
     protocol: Optional[str] = None
+    process_guid: Optional[str] = None
+    target_filename: Optional[str] = None
+    creation_utctime: Optional[str] = None
+    rule_name: Optional[str] = None
+    event_data: Optional[Dict[str, Any]] = None
 
 def _to_iso8601_z(ts: str) -> str:
     """
@@ -85,6 +90,11 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
     dst_port = _safe_int(ev.get("DestinationPort") or ev.get("DestinationPortNumber") or ev.get("dst_port"))
     protocol = ev.get("Protocol") or ev.get("TransportProtocol") or ev.get("protocol")
 
+    process_guid = ev.get("ProcessGuid") or ev.get("ProcessGUID")
+    target_filename = ev.get("TargetFilename") or ev.get("TargetFileName")
+    creation_utctime = ev.get("CreationUtcTime") or ev.get("CreationTime")
+    rule_name = ev.get("RuleName") or ev.get("Rule")
+
     return SysmonNormalized(
         ts=_to_iso8601_z(str(ts)),
         host=str(host) if host else None,
@@ -101,6 +111,11 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
         dst_ip=str(dst_ip) if dst_ip else None,
         dst_port=dst_port,
         protocol=str(protocol) if protocol else None,
+        process_guid=str(process_guid) if process_guid else None,
+        target_filename=str(target_filename) if target_filename else None,
+        creation_utctime=str(creation_utctime) if creation_utctime else None,
+        rule_name=str(rule_name) if rule_name else None,
+        event_data=dict(ev) if isinstance(ev, dict) else None,
     )
 
 def iter_sysmon_events(file_path: str) -> Iterator[SysmonNormalized]:
