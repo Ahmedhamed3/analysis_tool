@@ -15,6 +15,11 @@ class SysmonNormalized:
     parent_pid: Optional[int]
     parent_image: Optional[str]
     parent_cmd: Optional[str]
+    src_ip: Optional[str] = None
+    src_port: Optional[int] = None
+    dst_ip: Optional[str] = None
+    dst_port: Optional[int] = None
+    protocol: Optional[str] = None
 
 def _to_iso8601_z(ts: str) -> str:
     """
@@ -74,6 +79,12 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
     parent_image = ev.get("ParentImage") or ev.get("ParentProcessImage")
     parent_cmd = ev.get("ParentCommandLine") or ev.get("ParentCmdLine")
 
+    src_ip = ev.get("SourceIp") or ev.get("SourceIP") or ev.get("src_ip")
+    src_port = _safe_int(ev.get("SourcePort") or ev.get("SourcePortNumber") or ev.get("src_port"))
+    dst_ip = ev.get("DestinationIp") or ev.get("DestinationIP") or ev.get("dst_ip")
+    dst_port = _safe_int(ev.get("DestinationPort") or ev.get("DestinationPortNumber") or ev.get("dst_port"))
+    protocol = ev.get("Protocol") or ev.get("TransportProtocol") or ev.get("protocol")
+
     return SysmonNormalized(
         ts=_to_iso8601_z(str(ts)),
         host=str(host) if host else None,
@@ -85,6 +96,11 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
         parent_pid=parent_pid,
         parent_image=str(parent_image) if parent_image else None,
         parent_cmd=str(parent_cmd) if parent_cmd else None,
+        src_ip=str(src_ip) if src_ip else None,
+        src_port=src_port,
+        dst_ip=str(dst_ip) if dst_ip else None,
+        dst_port=dst_port,
+        protocol=str(protocol) if protocol else None,
     )
 
 def iter_sysmon_events(file_path: str) -> Iterator[SysmonNormalized]:
