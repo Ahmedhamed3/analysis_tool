@@ -63,3 +63,37 @@ def test_convert_sysmon_upload_json_array_mixed_events():
     assert (7, 701) in type_pairs
     assert (4001, 400101) in type_pairs
     assert (1001, 100101) in type_pairs
+
+
+def test_convert_sysmon_preview_returns_original_and_unified():
+    client = TestClient(app)
+
+    payload = [
+        {
+            "EventID": 11,
+            "UtcTime": "2024-01-01 00:00:01.500",
+            "Computer": "host1",
+            "User": "user1",
+            "ProcessId": 5555,
+            "Image": "C:\\Windows\\System32\\notepad.exe",
+            "TargetFilename": "C:\\Temp\\created.txt",
+        }
+    ]
+
+    files = {
+        "file": (
+            "preview.json",
+            json.dumps(payload).encode("utf-8"),
+            "application/json",
+        )
+    }
+
+    response = client.post("/convert/sysmon/preview", files=files)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "original" in body
+    assert "unified_ndjson" in body
+    assert "\"class_uid\"" in body["unified_ndjson"]
+    assert "\"activity_id\"" in body["unified_ndjson"]
+    assert "\"type_uid\"" in body["unified_ndjson"]
