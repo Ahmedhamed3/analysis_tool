@@ -108,6 +108,7 @@ def iter_sysmon_events(file_path: str) -> Iterator[SysmonNormalized]:
     Supports:
       - JSON array file
       - JSONL (one object per line)
+      - Wrapper dict {"Events": [...]} (or "events")
     """
     with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as f:
         first = f.readline().strip()
@@ -123,6 +124,28 @@ def iter_sysmon_events(file_path: str) -> Iterator[SysmonNormalized]:
             if isinstance(ev, dict):
                 yield _extract_fields(ev)
         return
+
+    if first.startswith("{"):
+        try:
+            with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                events = data.get("Events") or data.get("events")
+                if isinstance(events, list):
+                    for ev in events:
+                        if isinstance(ev, dict):
+                            yield _extract_fields(ev)
+                    return
+                if isinstance(data, dict):
+                    yield _extract_fields(data)
+                    return
+            if isinstance(data, list):
+                for ev in data:
+                    if isinstance(ev, dict):
+                        yield _extract_fields(ev)
+                return
+        except Exception:
+            pass
 
     # JSONL
     def _gen() -> Iterator[SysmonNormalized]:
