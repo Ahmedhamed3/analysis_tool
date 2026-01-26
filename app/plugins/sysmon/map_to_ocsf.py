@@ -12,6 +12,7 @@ from app.ocsf.constants import (
     DEFAULT_FILE_TYPE_ID,
     calc_type_uid,
 )
+from app.ocsf.process import build_parent_process, build_process
 from app.plugins.sysmon.parse import SysmonNormalized
 
 NETWORK_CATEGORY_UID = 4
@@ -64,43 +65,24 @@ def map_sysmon_eventid1_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]
         device["hostname"] = ev.host
 
     # Required by process_activity: process (and process constraint wants pid or uid)
-    process: Dict[str, Any] = {}
-    if ev.pid is not None:
-        process["pid"] = ev.pid
-    if ev.process_guid:
-        process["uid"] = ev.process_guid
-    if ev.cmd:
-        process["command_line"] = ev.cmd
-
-    # Prefer file object for Image (more schema-accurate than process.name)
-    if ev.image:
-        process["executable"] = ev.image
-        fname = _basename(ev.image)
-        # If process.file exists, file.json usually requires name + type_id
-        process["file"] = {
-            "name": fname or "unknown",
-            "type_id": DEFAULT_FILE_TYPE_ID,
-            "path": ev.image,  # recommended
-        }
+    process = build_process(
+        pid=ev.pid,
+        uid=ev.process_guid,
+        command_line=ev.cmd,
+        executable=ev.image,
+        include_file=True,
+    )
 
     # Parent process (recommended)
     if ev.parent_pid is not None or ev.parent_image or ev.parent_cmd or ev.parent_process_guid:
-        parent: Dict[str, Any] = {}
-        if ev.parent_pid is not None:
-            parent["pid"] = ev.parent_pid
-        if ev.parent_process_guid:
-            parent["uid"] = ev.parent_process_guid
-        if ev.parent_cmd:
-            parent["command_line"] = ev.parent_cmd
-        if ev.parent_image:
-            parent["executable"] = ev.parent_image
-            pfname = _basename(ev.parent_image)
-            parent["file"] = {
-                "name": pfname or "unknown",
-                "type_id": DEFAULT_FILE_TYPE_ID,
-                "path": ev.parent_image,
-            }
-        process["parent_process"] = parent
+        parent = build_parent_process(
+            pid=ev.parent_pid,
+            uid=ev.parent_process_guid,
+            command_line=ev.parent_cmd,
+            executable=ev.parent_image,
+        )
+        if parent:
+            process["parent_process"] = parent
 
     # If we still don't have pid/uid, we can't emit a valid process object
     if "pid" not in process and "uid" not in process:
@@ -135,7 +117,6 @@ def map_sysmon_eventid1_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]
         },
         "actor": actor if actor else {"app_name": "unknown"},  # still satisfies "actor has at least one"
         "device": device,
-        "process": process,
     }
 
     if unmapped:
