@@ -6,16 +6,16 @@ from typing import Any, Dict, Iterable, Iterator, Optional
 @dataclass
 class SysmonNormalized:
     ts: str
-    utc_time: Optional[str]
-    host: Optional[str]
-    user: Optional[str]
-    event_id: int
-    pid: Optional[int]
-    image: Optional[str]
-    cmd: Optional[str]
-    parent_pid: Optional[int]
-    parent_image: Optional[str]
-    parent_cmd: Optional[str]
+    utc_time: Optional[str] = None
+    host: Optional[str] = None
+    user: Optional[str] = None
+    event_id: int = -1
+    pid: Optional[int] = None
+    image: Optional[str] = None
+    cmd: Optional[str] = None
+    parent_pid: Optional[int] = None
+    parent_image: Optional[str] = None
+    parent_cmd: Optional[str] = None
     src_ip: Optional[str] = None
     src_port: Optional[int] = None
     dst_ip: Optional[str] = None
