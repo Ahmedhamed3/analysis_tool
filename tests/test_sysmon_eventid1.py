@@ -24,8 +24,10 @@ def test_eventid1_maps_to_process_launch():
     assert out["category_uid"] == 1
     assert out["type_uid"] == 701
     assert out["time"] == "2024-01-01T00:00:00Z"
-    assert "actor" in out and "device" in out and "process" in out
-    assert out["process"]["pid"] == 1234
+    assert "actor" in out and "device" in out
+    assert "process" not in out
+    assert out["actor"]["process"]["pid"] == 1234
+    assert out["actor"]["process"]["parent_process"]["pid"] == 2222
 
 
 def test_eventid1_command_line_and_parent_fields_from_eventdata(tmp_path):
@@ -60,7 +62,8 @@ def test_eventid1_command_line_and_parent_fields_from_eventdata(tmp_path):
     assert out is not None
     assert out["actor"]["process"]["command_line"] == "cmd.exe /c whoami"
     assert out["actor"]["process"]["executable"] == "C:\\Windows\\System32\\cmd.exe"
-    assert out["process"]["parent_process"]["pid"] == 2222
-    assert out["process"]["parent_process"]["command_line"] == "explorer.exe"
-    assert out["process"]["parent_process"]["uid"] == "{DEF-456}"
+    assert "process" not in out
+    assert out["actor"]["process"]["parent_process"]["pid"] == 2222
+    assert out["actor"]["process"]["parent_process"]["command_line"] == "explorer.exe"
+    assert out["actor"]["process"]["parent_process"]["uid"] == "{DEF-456}"
     assert out["unmapped"]["original_event"] == payload[0]
