@@ -20,3 +20,7 @@ DEFAULT_METADATA_VERSION = "unknown"  # replace later if you can extract Sysmon 
 
 DEFAULT_DEVICE_TYPE_ID = 0  # unknown (we’ll refine after reading device.json enum)
 DEFAULT_FILE_TYPE_ID = 0    # unknown (we’ll refine after reading file.json enum)
+
+# Security Finding (OCSF class UID for findings)
+SECURITY_FINDING_CLASS_UID = 2004
+SECURITY_FINDING_ACTIVITY_ALERT_ID = 1
