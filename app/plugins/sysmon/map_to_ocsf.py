@@ -67,11 +67,14 @@ def map_sysmon_eventid1_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]
     process: Dict[str, Any] = {}
     if ev.pid is not None:
         process["pid"] = ev.pid
+    if ev.process_guid:
+        process["uid"] = ev.process_guid
     if ev.cmd:
-        process["cmd_line"] = ev.cmd
+        process["command_line"] = ev.cmd
 
     # Prefer file object for Image (more schema-accurate than process.name)
     if ev.image:
+        process["executable"] = ev.image
         fname = _basename(ev.image)
         # If process.file exists, file.json usually requires name + type_id
         process["file"] = {
@@ -81,13 +84,16 @@ def map_sysmon_eventid1_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]
         }
 
     # Parent process (recommended)
-    if ev.parent_pid is not None or ev.parent_image or ev.parent_cmd:
+    if ev.parent_pid is not None or ev.parent_image or ev.parent_cmd or ev.parent_process_guid:
         parent: Dict[str, Any] = {}
         if ev.parent_pid is not None:
             parent["pid"] = ev.parent_pid
+        if ev.parent_process_guid:
+            parent["uid"] = ev.parent_process_guid
         if ev.parent_cmd:
-            parent["cmd_line"] = ev.parent_cmd
+            parent["command_line"] = ev.parent_cmd
         if ev.parent_image:
+            parent["executable"] = ev.parent_image
             pfname = _basename(ev.parent_image)
             parent["file"] = {
                 "name": pfname or "unknown",
@@ -99,6 +105,21 @@ def map_sysmon_eventid1_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]
     # If we still don't have pid/uid, we can't emit a valid process object
     if "pid" not in process and "uid" not in process:
         return None
+
+    if process:
+        actor["process"] = process
+
+    unmapped: Dict[str, Any] = {}
+    if ev.process_guid:
+        unmapped["process_guid"] = ev.process_guid
+    if ev.parent_process_guid:
+        unmapped["parent_process_guid"] = ev.parent_process_guid
+    if ev.integrity_level:
+        unmapped["integrity_level"] = ev.integrity_level
+    if ev.current_directory:
+        unmapped["current_directory"] = ev.current_directory
+    if ev.event_data:
+        unmapped["original_event"] = ev.event_data
 
     # Build OCSF event
     ocsf_event: Dict[str, Any] = {
@@ -116,6 +137,9 @@ def map_sysmon_eventid1_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]
         "device": device,
         "process": process,
     }
+
+    if unmapped:
+        ocsf_event["unmapped"] = unmapped
 
     return ocsf_event
 
