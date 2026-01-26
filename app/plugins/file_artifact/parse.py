@@ -1,7 +1,7 @@
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 
 @dataclass
@@ -93,6 +93,18 @@ def _extract_fields(record: dict[str, Any]) -> FileArtifactNormalized:
     )
 
 
+def normalize_file_artifact_record(record: dict[str, Any]) -> FileArtifactNormalized:
+    return _extract_fields(record)
+
+
+def iter_file_artifact_events_from_records(
+    records: Iterable[dict[str, Any]],
+) -> Iterator[FileArtifactNormalized]:
+    for record in records:
+        if isinstance(record, dict):
+            yield _extract_fields(record)
+
+
 def iter_file_artifact_events(file_path: str) -> Iterator[FileArtifactNormalized]:
     """
     Supports JSON array, JSON object, or JSONL.
@@ -106,9 +118,7 @@ def iter_file_artifact_events(file_path: str) -> Iterator[FileArtifactNormalized
     if first.startswith("["):
         with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as handle:
             data = json.load(handle)
-        for record in data:
-            if isinstance(record, dict):
-                yield _extract_fields(record)
+        yield from iter_file_artifact_events_from_records(data)
         return
 
     if first.startswith("{"):
@@ -117,21 +127,15 @@ def iter_file_artifact_events(file_path: str) -> Iterator[FileArtifactNormalized
                 data = json.load(handle)
             if isinstance(data, dict):
                 if "records" in data and isinstance(data["records"], list):
-                    for record in data["records"]:
-                        if isinstance(record, dict):
-                            yield _extract_fields(record)
+                    yield from iter_file_artifact_events_from_records(data["records"])
                     return
                 if "events" in data and isinstance(data["events"], list):
-                    for record in data["events"]:
-                        if isinstance(record, dict):
-                            yield _extract_fields(record)
+                    yield from iter_file_artifact_events_from_records(data["events"])
                     return
-                yield _extract_fields(data)
+                yield normalize_file_artifact_record(data)
                 return
             if isinstance(data, list):
-                for record in data:
-                    if isinstance(record, dict):
-                        yield _extract_fields(record)
+                yield from iter_file_artifact_events_from_records(data)
                 return
         except Exception:
             pass

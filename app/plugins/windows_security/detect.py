@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, List, Tuple
 
 
 TARGET_EVENT_IDS = {4624, 4625}
@@ -119,3 +119,63 @@ def detect_windows_security_json(file_path: str) -> bool:
         return False
     except Exception:
         return False
+
+
+def score_events(events: List[dict]) -> Tuple[float, str]:
+    if not events:
+        return 0.0, "No events provided for detection."
+
+    def _safe_int(value: Any) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return -1
+
+    def _get_nested(ev: dict, *keys: str) -> Any:
+        current: Any = ev
+        for key in keys:
+            if not isinstance(current, dict):
+                return None
+            current = current.get(key)
+        return current
+
+    total = 0
+    matched = 0
+    with_payload = 0
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        total += 1
+        event_id = _safe_int(
+            ev.get("EventID")
+            or _get_nested(ev, "System", "EventID")
+            or _get_nested(ev, "Event", "System", "EventID")
+        )
+        if event_id not in TARGET_EVENT_IDS:
+            continue
+        matched += 1
+        event_data = (
+            ev.get("EventData")
+            or _get_nested(ev, "EventData", "Data")
+            or _get_nested(ev, "Event", "EventData")
+            or _get_nested(ev, "Event", "EventData", "Data")
+        )
+        time_created = (
+            ev.get("TimeCreated")
+            or _get_nested(ev, "System", "TimeCreated")
+            or _get_nested(ev, "Event", "System", "TimeCreated")
+        )
+        if event_data is not None and time_created is not None:
+            with_payload += 1
+
+    if total == 0:
+        return 0.0, "No JSON objects to score."
+
+    score = matched / total
+    if matched and with_payload:
+        score = min(1.0, score + 0.2)
+
+    reason = f"Matched {matched}/{total} events with EventID 4624/4625."
+    if with_payload:
+        reason += " EventData and TimeCreated fields present."
+    return score, reason

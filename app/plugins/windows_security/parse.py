@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterable, Iterator, Optional
 
 
 @dataclass
@@ -124,6 +124,18 @@ def _extract_fields(ev: Dict[str, Any]) -> WindowsSecurityNormalized:
     )
 
 
+def normalize_windows_security_event(ev: Dict[str, Any]) -> WindowsSecurityNormalized:
+    return _extract_fields(ev)
+
+
+def iter_windows_security_events_from_events(
+    events: Iterable[Dict[str, Any]],
+) -> Iterator[WindowsSecurityNormalized]:
+    for ev in events:
+        if isinstance(ev, dict):
+            yield _extract_fields(ev)
+
+
 def iter_windows_security_events(file_path: str) -> Iterator[WindowsSecurityNormalized]:
     with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as f:
         first = f.readline().strip()
@@ -151,7 +163,7 @@ def iter_windows_security_events(file_path: str) -> Iterator[WindowsSecurityNorm
                         if isinstance(ev, dict):
                             yield _extract_fields(ev)
                     return
-                yield _extract_fields(data)
+                yield normalize_windows_security_event(data)
                 return
             if isinstance(data, list):
                 for ev in data:

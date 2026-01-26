@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Tuple
 
 
 def detect_zeek_dns_json(file_path: str) -> bool:
@@ -42,3 +42,27 @@ def detect_zeek_dns_json(file_path: str) -> bool:
         return matched > 0
     except Exception:
         return False
+
+
+def score_events(events: List[dict]) -> Tuple[float, str]:
+    if not events:
+        return 0.0, "No events provided for detection."
+
+    total = 0
+    matched = 0
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        total += 1
+        has_query = "query" in ev
+        has_hosts = any(key in ev for key in ("id.orig_h", "id.resp_h"))
+        has_rcode = "rcode_name" in ev or "rcode" in ev
+        if has_query and (has_hosts or has_rcode):
+            matched += 1
+
+    if total == 0:
+        return 0.0, "No JSON objects to score."
+
+    score = matched / total
+    reason = f"Matched {matched}/{total} events with Zeek DNS fields."
+    return score, reason
