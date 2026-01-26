@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, Iterator, Optional
 @dataclass
 class SysmonNormalized:
     ts: str
+    utc_time: Optional[str]
     host: Optional[str]
     user: Optional[str]
     event_id: int
@@ -24,6 +25,9 @@ class SysmonNormalized:
     target_filename: Optional[str] = None
     creation_utctime: Optional[str] = None
     rule_name: Optional[str] = None
+    query_name: Optional[str] = None
+    query_results: Optional[str] = None
+    query_status: Optional[str] = None
     event_data: Optional[Dict[str, Any]] = None
 
 def _to_iso8601_z(ts: str) -> str:
@@ -65,13 +69,10 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
     # Sysmon exports vary. We handle common keys.
     event_id = _safe_int(ev.get("EventID") or ev.get("EventId") or ev.get("event_id")) or -1
 
-    ts = (
-        ev.get("UtcTime")
-        or ev.get("TimeCreated")
-        or ev.get("time")
-        or ev.get("Timestamp")
-        or ""
-    )
+    event_data = ev.get("EventData") if isinstance(ev.get("EventData"), dict) else None
+    utc_time = ev.get("UtcTime") or (event_data.get("UtcTime") if event_data else None)
+
+    ts = utc_time or ev.get("TimeCreated") or ev.get("time") or ev.get("Timestamp") or ""
 
     host = ev.get("Computer") or ev.get("Host") or ev.get("hostname")
     user = ev.get("User") or ev.get("UserName") or ev.get("user")
@@ -94,9 +95,13 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
     target_filename = ev.get("TargetFilename") or ev.get("TargetFileName")
     creation_utctime = ev.get("CreationUtcTime") or ev.get("CreationTime")
     rule_name = ev.get("RuleName") or ev.get("Rule")
+    query_name = ev.get("QueryName") or (event_data.get("QueryName") if event_data else None)
+    query_results = ev.get("QueryResults") or (event_data.get("QueryResults") if event_data else None)
+    query_status = ev.get("QueryStatus") or (event_data.get("QueryStatus") if event_data else None)
 
     return SysmonNormalized(
         ts=_to_iso8601_z(str(ts)),
+        utc_time=str(utc_time) if utc_time else None,
         host=str(host) if host else None,
         user=str(user) if user else None,
         event_id=event_id,
@@ -115,6 +120,9 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
         target_filename=str(target_filename) if target_filename else None,
         creation_utctime=str(creation_utctime) if creation_utctime else None,
         rule_name=str(rule_name) if rule_name else None,
+        query_name=str(query_name) if query_name else None,
+        query_results=str(query_results) if query_results else None,
+        query_status=str(query_status) if query_status else None,
         event_data=dict(ev) if isinstance(ev, dict) else None,
     )
 
