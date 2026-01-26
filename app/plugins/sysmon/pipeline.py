@@ -5,6 +5,13 @@ from app.plugins.sysmon.parse import iter_sysmon_events
 from app.plugins.sysmon.map_to_ocsf import (
     map_sysmon_eventid1_to_ocsf,
     map_sysmon_eventid3_to_ocsf,
+    map_sysmon_eventid5_to_ocsf,
+    map_sysmon_eventid7_to_ocsf,
+    map_sysmon_eventid8_to_ocsf,
+    map_sysmon_eventid10_to_ocsf,
+    map_sysmon_eventid12_to_ocsf,
+    map_sysmon_eventid13_to_ocsf,
+    map_sysmon_eventid14_to_ocsf,
     map_sysmon_eventid11_to_ocsf,
     map_sysmon_eventid22_to_ocsf,
 )
@@ -12,7 +19,14 @@ from app.plugins.sysmon.map_to_ocsf import (
 EVENT_MAPPERS = {
     1: map_sysmon_eventid1_to_ocsf,
     3: map_sysmon_eventid3_to_ocsf,
+    5: map_sysmon_eventid5_to_ocsf,
+    7: map_sysmon_eventid7_to_ocsf,
+    8: map_sysmon_eventid8_to_ocsf,
+    10: map_sysmon_eventid10_to_ocsf,
     11: map_sysmon_eventid11_to_ocsf,
+    12: map_sysmon_eventid12_to_ocsf,
+    13: map_sysmon_eventid13_to_ocsf,
+    14: map_sysmon_eventid14_to_ocsf,
     22: map_sysmon_eventid22_to_ocsf,
 }
 

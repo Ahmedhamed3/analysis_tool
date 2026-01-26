@@ -25,12 +25,26 @@ class SysmonNormalized:
     dst_port: Optional[int] = None
     protocol: Optional[str] = None
     process_guid: Optional[str] = None
+    source_process_guid: Optional[str] = None
+    source_pid: Optional[int] = None
+    source_image: Optional[str] = None
+    target_process_guid: Optional[str] = None
+    target_pid: Optional[int] = None
+    target_image: Optional[str] = None
     target_filename: Optional[str] = None
     creation_utctime: Optional[str] = None
     rule_name: Optional[str] = None
     query_name: Optional[str] = None
     query_results: Optional[str] = None
     query_status: Optional[str] = None
+    image_loaded: Optional[str] = None
+    event_type: Optional[str] = None
+    target_object: Optional[str] = None
+    details: Optional[str] = None
+    new_name: Optional[str] = None
+    granted_access: Optional[str] = None
+    start_address: Optional[str] = None
+    start_module: Optional[str] = None
     event_data: Optional[Dict[str, Any]] = None
 
 def _to_iso8601_z(ts: str) -> str:
@@ -88,8 +102,25 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
     host = _value_from_event(ev, event_data, "Computer", "Host", "hostname")
     user = _value_from_event(ev, event_data, "User", "UserName", "user")
 
-    pid = _safe_int(_value_from_event(ev, event_data, "ProcessId", "ProcessID", "pid"))
-    image = _value_from_event(ev, event_data, "Image", "ProcessImage", "image")
+    pid = _safe_int(
+        _value_from_event(
+            ev,
+            event_data,
+            "ProcessId",
+            "ProcessID",
+            "pid",
+            "SourceProcessId",
+            "SourceProcessID",
+        )
+    )
+    image = _value_from_event(
+        ev,
+        event_data,
+        "Image",
+        "ProcessImage",
+        "image",
+        "SourceImage",
+    )
     cmd = _value_from_event(ev, event_data, "CommandLine", "cmd", "CmdLine")
 
     parent_pid = _safe_int(_value_from_event(ev, event_data, "ParentProcessId", "ParentProcessID"))
@@ -103,7 +134,20 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
     dst_port = _safe_int(ev.get("DestinationPort") or ev.get("DestinationPortNumber") or ev.get("dst_port"))
     protocol = ev.get("Protocol") or ev.get("TransportProtocol") or ev.get("protocol")
 
-    process_guid = _value_from_event(ev, event_data, "ProcessGuid", "ProcessGUID")
+    process_guid = _value_from_event(
+        ev,
+        event_data,
+        "ProcessGuid",
+        "ProcessGUID",
+        "SourceProcessGuid",
+        "SourceProcessGUID",
+    )
+    source_process_guid = _value_from_event(ev, event_data, "SourceProcessGuid", "SourceProcessGUID")
+    source_pid = _safe_int(_value_from_event(ev, event_data, "SourceProcessId", "SourceProcessID"))
+    source_image = _value_from_event(ev, event_data, "SourceImage")
+    target_process_guid = _value_from_event(ev, event_data, "TargetProcessGuid", "TargetProcessGUID")
+    target_pid = _safe_int(_value_from_event(ev, event_data, "TargetProcessId", "TargetProcessID"))
+    target_image = _value_from_event(ev, event_data, "TargetImage")
     target_filename = ev.get("TargetFilename") or ev.get("TargetFileName")
     creation_utctime = ev.get("CreationUtcTime") or ev.get("CreationTime")
     rule_name = ev.get("RuleName") or ev.get("Rule")
@@ -112,6 +156,14 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
     query_status = ev.get("QueryStatus") or (event_data.get("QueryStatus") if event_data else None)
     integrity_level = _value_from_event(ev, event_data, "IntegrityLevel")
     current_directory = _value_from_event(ev, event_data, "CurrentDirectory")
+    image_loaded = _value_from_event(ev, event_data, "ImageLoaded")
+    event_type = _value_from_event(ev, event_data, "EventType")
+    target_object = _value_from_event(ev, event_data, "TargetObject")
+    details = _value_from_event(ev, event_data, "Details")
+    new_name = _value_from_event(ev, event_data, "NewName")
+    granted_access = _value_from_event(ev, event_data, "GrantedAccess")
+    start_address = _value_from_event(ev, event_data, "StartAddress")
+    start_module = _value_from_event(ev, event_data, "StartModule")
 
     return SysmonNormalized(
         ts=_to_iso8601_z(str(ts)),
@@ -132,6 +184,12 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
         dst_port=dst_port,
         protocol=str(protocol) if protocol else None,
         process_guid=str(process_guid) if process_guid else None,
+        source_process_guid=str(source_process_guid) if source_process_guid else None,
+        source_pid=source_pid,
+        source_image=str(source_image) if source_image else None,
+        target_process_guid=str(target_process_guid) if target_process_guid else None,
+        target_pid=target_pid,
+        target_image=str(target_image) if target_image else None,
         target_filename=str(target_filename) if target_filename else None,
         creation_utctime=str(creation_utctime) if creation_utctime else None,
         rule_name=str(rule_name) if rule_name else None,
@@ -140,6 +198,14 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
         query_status=str(query_status) if query_status else None,
         integrity_level=str(integrity_level) if integrity_level else None,
         current_directory=str(current_directory) if current_directory else None,
+        image_loaded=str(image_loaded) if image_loaded else None,
+        event_type=str(event_type) if event_type else None,
+        target_object=str(target_object) if target_object else None,
+        details=str(details) if details else None,
+        new_name=str(new_name) if new_name else None,
+        granted_access=str(granted_access) if granted_access else None,
+        start_address=str(start_address) if start_address else None,
+        start_module=str(start_module) if start_module else None,
         event_data=dict(ev) if isinstance(ev, dict) else None,
     )
 
