@@ -24,3 +24,6 @@ DEFAULT_FILE_TYPE_ID = 0    # unknown (we’ll refine after reading file.json en
 # Security Finding (OCSF class UID for findings)
 SECURITY_FINDING_CLASS_UID = 2004
 SECURITY_FINDING_ACTIVITY_ALERT_ID = 1
+
+# Authentication Activity
+AUTHENTICATION_ACTIVITY_CLASS_UID = 3002
