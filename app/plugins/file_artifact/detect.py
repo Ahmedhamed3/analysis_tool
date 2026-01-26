@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, List, Tuple
 
 HASH_KEYS = {"sha256", "sha1", "md5"}
 FILE_KEYS = {"file_path", "file_name"}
@@ -93,3 +93,24 @@ def detect_file_artifact_json(file_path: str) -> bool:
         return False
     except Exception:
         return False
+
+
+def score_events(events: List[dict]) -> Tuple[float, str]:
+    if not events:
+        return 0.0, "No events provided for detection."
+
+    total = 0
+    matched = 0
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        total += 1
+        if _is_file_artifact_record(ev):
+            matched += 1
+
+    if total == 0:
+        return 0.0, "No JSON objects to score."
+
+    score = matched / total
+    reason = f"Matched {matched}/{total} events with file + hash fields."
+    return score, reason

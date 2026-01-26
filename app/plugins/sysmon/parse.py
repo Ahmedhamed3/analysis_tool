@@ -209,6 +209,16 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
         event_data=dict(ev) if isinstance(ev, dict) else None,
     )
 
+
+def normalize_sysmon_event(ev: Dict[str, Any]) -> SysmonNormalized:
+    return _extract_fields(ev)
+
+
+def iter_sysmon_events_from_events(events: Iterable[Dict[str, Any]]) -> Iterator[SysmonNormalized]:
+    for ev in events:
+        if isinstance(ev, dict):
+            yield _extract_fields(ev)
+
 def iter_sysmon_events(file_path: str) -> Iterator[SysmonNormalized]:
     """
     Supports:
@@ -226,9 +236,7 @@ def iter_sysmon_events(file_path: str) -> Iterator[SysmonNormalized]:
     if first.startswith("["):
         with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as f:
             data = json.load(f)
-        for ev in data:
-            if isinstance(ev, dict):
-                yield _extract_fields(ev)
+        yield from iter_sysmon_events_from_events(data)
         return
 
     if first.startswith("{"):
@@ -238,17 +246,13 @@ def iter_sysmon_events(file_path: str) -> Iterator[SysmonNormalized]:
             if isinstance(data, dict):
                 events = data.get("Events") or data.get("events")
                 if isinstance(events, list):
-                    for ev in events:
-                        if isinstance(ev, dict):
-                            yield _extract_fields(ev)
+                    yield from iter_sysmon_events_from_events(events)
                     return
                 if isinstance(data, dict):
-                    yield _extract_fields(data)
+                    yield normalize_sysmon_event(data)
                     return
             if isinstance(data, list):
-                for ev in data:
-                    if isinstance(ev, dict):
-                        yield _extract_fields(ev)
+                yield from iter_sysmon_events_from_events(data)
                 return
         except Exception:
             pass
@@ -265,7 +269,7 @@ def iter_sysmon_events(file_path: str) -> Iterator[SysmonNormalized]:
                 try:
                     ev = json.loads(line)
                     if isinstance(ev, dict):
-                        yield _extract_fields(ev)
+                        yield normalize_sysmon_event(ev)
                 except Exception:
                     continue
 

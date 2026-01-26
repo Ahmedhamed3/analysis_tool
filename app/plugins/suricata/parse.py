@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterable, Iterator, Optional
 
 
 @dataclass
@@ -56,6 +56,21 @@ def _extract_fields(ev: Dict[str, Any]) -> SuricataAlertNormalized:
         flow_id=flow_id,
         original_event=dict(ev),
     )
+
+
+def normalize_suricata_event(ev: Dict[str, Any]) -> SuricataAlertNormalized:
+    return _extract_fields(ev)
+
+
+def iter_suricata_events_from_events(
+    events: Iterable[Dict[str, Any]],
+) -> Iterator[SuricataAlertNormalized]:
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        if ev.get("event_type") != "alert":
+            continue
+        yield _extract_fields(ev)
 
 
 def iter_suricata_events(file_path: str) -> Iterator[SuricataAlertNormalized]:

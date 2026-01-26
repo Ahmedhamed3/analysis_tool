@@ -1,21 +1,21 @@
-import os
-import tempfile
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from app.correlation.process_chain import build_process_chains
-from app.plugins.sysmon.detect import detect_sysmon_json
-from app.plugins.sysmon.pipeline import convert_sysmon_file_to_ocsf_jsonl
-from app.plugins.suricata.detect import detect_suricata_eve_json
-from app.plugins.suricata.pipeline import convert_suricata_file_to_ocsf_jsonl
-from app.plugins.zeek.detect import detect_zeek_dns_json
-from app.plugins.zeek.pipeline import convert_zeek_dns_file_to_ocsf_jsonl
-from app.plugins.windows_security.detect import detect_windows_security_json
-from app.plugins.windows_security.pipeline import convert_windows_security_file_to_ocsf_jsonl
-from app.plugins.file_artifact.detect import detect_file_artifact_json
-from app.plugins.file_artifact.pipeline import convert_file_artifact_file_to_ocsf_jsonl
+from app.detect import auto_detect_source
+from app.formats.reader import iter_events_from_upload
+from app.plugins.file_artifact.detect import score_events as score_file_artifact
+from app.plugins.file_artifact.pipeline import convert_file_artifact_events_to_ocsf_jsonl
+from app.plugins.suricata.detect import score_events as score_suricata
+from app.plugins.suricata.pipeline import convert_suricata_events_to_ocsf_jsonl
+from app.plugins.sysmon.detect import score_events as score_sysmon
+from app.plugins.sysmon.pipeline import convert_sysmon_events_to_ocsf_jsonl
+from app.plugins.windows_security.detect import score_events as score_windows_security
+from app.plugins.windows_security.pipeline import convert_windows_security_events_to_ocsf_jsonl
+from app.plugins.zeek.detect import score_events as score_zeek
+from app.plugins.zeek.pipeline import convert_zeek_dns_events_to_ocsf_jsonl
 
 app = FastAPI(
     title="Log → OCSF Converter (MVP)",
@@ -23,6 +23,26 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+DETECTION_SAMPLE_SIZE = 10
+DETECTION_THRESHOLD = 0.6
+
+SOURCE_PIPELINES = {
+    "sysmon": convert_sysmon_events_to_ocsf_jsonl,
+    "zeek": convert_zeek_dns_events_to_ocsf_jsonl,
+    "suricata": convert_suricata_events_to_ocsf_jsonl,
+    "windows-security": convert_windows_security_events_to_ocsf_jsonl,
+    "file-artifact": convert_file_artifact_events_to_ocsf_jsonl,
+}
+
+SOURCE_SCORERS = {
+    "sysmon": score_sysmon,
+    "zeek": score_zeek,
+    "suricata": score_suricata,
+    "windows-security": score_windows_security,
+    "file-artifact": score_file_artifact,
+}
 
 HTML_PAGE = """<!doctype html>
 <html lang="en">
@@ -66,6 +86,27 @@ HTML_PAGE = """<!doctype html>
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
         gap: 16px;
+      }
+      .detect-panel {
+        background: #fff;
+        border: 1px solid #e4e7eb;
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin-bottom: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .detect-panel h3 {
+        margin: 0;
+        font-size: 13px;
+        text-transform: uppercase;
+        color: #52606d;
+        letter-spacing: 0.04em;
+      }
+      .detect-row {
+        font-size: 13px;
+        color: #1f2933;
       }
       .pane {
         background: #fff;
@@ -147,6 +188,7 @@ HTML_PAGE = """<!doctype html>
     <div class="controls">
       <input type="file" id="fileInput" />
       <select id="sourceSelect">
+        <option value="auto">Auto Detect</option>
         <option value="sysmon">Sysmon</option>
         <option value="zeek">Zeek DNS</option>
         <option value="suricata">Suricata Alerts</option>
@@ -154,6 +196,12 @@ HTML_PAGE = """<!doctype html>
         <option value="file-artifact">File Artifact</option>
       </select>
       <button class="primary" id="previewBtn">Convert</button>
+    </div>
+    <div class="detect-panel" id="detectPanel">
+      <h3>Detection</h3>
+      <div class="detect-row" id="detectSource">Source: —</div>
+      <div class="detect-row" id="detectConfidence">Confidence: —</div>
+      <div class="detect-row" id="detectReason">Reason: —</div>
     </div>
     <div class="pane-grid">
       <div class="pane">
@@ -180,6 +228,9 @@ HTML_PAGE = """<!doctype html>
       const originalPane = document.getElementById("originalPane");
       const unifiedPane = document.getElementById("unifiedPane");
       const chainsContainer = document.getElementById("chainsContainer");
+      const detectSource = document.getElementById("detectSource");
+      const detectConfidence = document.getElementById("detectConfidence");
+      const detectReason = document.getElementById("detectReason");
       let cachedOcsfEvents = [];
 
       function parseNdjson(value) {
@@ -252,6 +303,23 @@ HTML_PAGE = """<!doctype html>
         });
       }
 
+      function updateDetectionPanel(detection, errorMessage) {
+        if (!detection) {
+          detectSource.textContent = "Source: —";
+          detectConfidence.textContent = "Confidence: —";
+          detectReason.textContent = "Reason: —";
+          return;
+        }
+        detectSource.textContent = `Source: ${detection.source_type || "unknown"}`;
+        if (detection.auto && typeof detection.confidence === "number") {
+          detectConfidence.textContent = `Confidence: ${detection.confidence.toFixed(2)}`;
+        } else {
+          detectConfidence.textContent = "Confidence: —";
+        }
+        const reasonText = detection.reason ? detection.reason : "—";
+        detectReason.textContent = `Reason: ${reasonText}${errorMessage ? ` (${errorMessage})` : ""}`;
+      }
+
       async function postPreview() {
         const file = fileInput.files[0];
         if (!file) {
@@ -260,7 +328,9 @@ HTML_PAGE = """<!doctype html>
         const formData = new FormData();
         formData.append("file", file);
         let endpoint = "/convert/sysmon/preview";
-        if (sourceSelect.value === "zeek") {
+        if (sourceSelect.value === "auto") {
+          endpoint = "/convert/auto/preview";
+        } else if (sourceSelect.value === "zeek") {
           endpoint = "/convert/zeek/preview";
         } else if (sourceSelect.value === "suricata") {
           endpoint = "/convert/suricata/preview";
@@ -277,12 +347,15 @@ HTML_PAGE = """<!doctype html>
           const detail = await response.text();
           originalPane.textContent = detail;
           unifiedPane.textContent = "";
+          cachedOcsfEvents = [];
+          updateDetectionPanel(null, null);
           return;
         }
         const data = await response.json();
         originalPane.textContent = data.original;
-        unifiedPane.textContent = data.unified_ndjson;
-        cachedOcsfEvents = parseNdjson(data.unified_ndjson);
+        unifiedPane.textContent = data.unified_ndjson || "";
+        cachedOcsfEvents = parseNdjson(data.unified_ndjson || "");
+        updateDetectionPanel(data.detection, data.error);
         renderChains([]);
       }
 
@@ -316,6 +389,56 @@ HTML_PAGE = """<!doctype html>
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return HTML_PAGE
+
+
+async def _read_upload(file: UploadFile) -> Dict[str, Any]:
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
+    events = list(iter_events_from_upload(content))
+    if not events:
+        raise HTTPException(status_code=400, detail="No events found in upload.")
+    original_text = content.decode("utf-8-sig", errors="replace")
+    return {"content": content, "events": events, "original_text": original_text}
+
+
+def _validate_selected_source(source_type: str, events: List[dict]) -> Dict[str, Any]:
+    scorer = SOURCE_SCORERS.get(source_type)
+    if not scorer:
+        raise HTTPException(status_code=400, detail=f"Unknown source type: {source_type}.")
+    confidence, reason = scorer(events[:DETECTION_SAMPLE_SIZE])
+    if confidence < DETECTION_THRESHOLD:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": f"Unsupported file or not detected as {source_type}.",
+                "confidence": confidence,
+                "reason": reason,
+            },
+        )
+    return {"confidence": confidence, "reason": reason}
+
+
+def _get_converter(source_type: str):
+    converter = SOURCE_PIPELINES.get(source_type)
+    if not converter:
+        raise HTTPException(status_code=400, detail=f"Unknown source type: {source_type}.")
+    return converter
+
+
+def _build_detection_payload(
+    source_type: str,
+    *,
+    auto: bool,
+    confidence: Optional[float] = None,
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "source_type": source_type,
+        "confidence": confidence,
+        "reason": reason or "—",
+        "auto": auto,
+    }
 
 
 def _extract_actor_process(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -369,414 +492,202 @@ async def correlate_process_chains(events: List[Dict[str, Any]]):
     chains = build_process_chains(events)
     return JSONResponse([_format_chain(chain) for chain in chains])
 
+def _stream_ndjson(events: List[dict], source_type: str, filename: str) -> StreamingResponse:
+    converter = _get_converter(source_type)
+    return StreamingResponse(
+        (line + "\n" for line in converter(events)),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+def _build_preview_response(
+    *,
+    original_text: str,
+    unified_lines: List[str],
+    detection: Dict[str, Any],
+    error: Optional[str] = None,
+) -> JSONResponse:
+    payload: Dict[str, Any] = {
+        "original": original_text,
+        "unified_ndjson": "\n".join(unified_lines),
+        "detection": detection,
+    }
+    if error:
+        payload["error"] = error
+    return JSONResponse(payload)
+
+
 @app.post("/convert/sysmon")
 async def convert_sysmon(file: UploadFile = File(...)):
-    # Save upload temporarily
-    suffix = os.path.splitext(file.filename or "")[1] or ".json"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        # basic size guard (50MB)
-        if len(content) > 50 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
-        tmp.write(content)
-        tmp.flush()
-        tmp_path = tmp.name
-
-    def _cleanup() -> None:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-
-    if not detect_sysmon_json(tmp_path):
-        preview_bytes = content[:200]
-        preview = preview_bytes.decode("utf-8-sig", errors="replace").strip()
-        detail = {
-            "error": "Unsupported file or not detected as Sysmon JSON.",
-            "filename": file.filename,
-            "suffix": suffix,
-            "preview": preview,
-        }
-        _cleanup()
-        raise HTTPException(status_code=400, detail=detail)
-
-    def _line_gen():
-        try:
-            yield from convert_sysmon_file_to_ocsf_jsonl(tmp_path)
-        finally:
-            _cleanup()
-
-    # Stream as NDJSON/JSONL
-    return StreamingResponse(
-        (line + "\n" for line in _line_gen()),
-        media_type="application/x-ndjson",
-        headers={"Content-Disposition": "attachment; filename=output.ocsf.jsonl"},
-    )
+    upload = await _read_upload(file)
+    _validate_selected_source("sysmon", upload["events"])
+    return _stream_ndjson(upload["events"], "sysmon", "output.ocsf.jsonl")
 
 
 @app.post("/convert/sysmon/preview")
 async def convert_sysmon_preview(file: UploadFile = File(...)):
-    suffix = os.path.splitext(file.filename or "")[1] or ".json"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        if len(content) > 50 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
-        tmp.write(content)
-        tmp.flush()
-        tmp_path = tmp.name
-    original_text = content.decode("utf-8-sig", errors="replace")
-
-    def _cleanup() -> None:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-
-    if not detect_sysmon_json(tmp_path):
-        detail = {
-            "error": "Unsupported file or not detected as Sysmon JSON.",
-            "filename": file.filename,
-            "preview": original_text.strip(),
-        }
-        _cleanup()
-        raise HTTPException(status_code=400, detail=detail)
-
-    try:
-        unified_lines = list(convert_sysmon_file_to_ocsf_jsonl(tmp_path))
-        unified_text = "\n".join(unified_lines)
-        return JSONResponse(
-            {
-                "original": original_text,
-                "unified_ndjson": unified_text,
-            }
-        )
-    finally:
-        _cleanup()
+    upload = await _read_upload(file)
+    _validate_selected_source("sysmon", upload["events"])
+    unified_lines = list(convert_sysmon_events_to_ocsf_jsonl(upload["events"]))
+    detection = _build_detection_payload(
+        "sysmon",
+        auto=False,
+        reason="Selected manually.",
+    )
+    return _build_preview_response(
+        original_text=upload["original_text"],
+        unified_lines=unified_lines,
+        detection=detection,
+    )
 
 
 @app.post("/convert/zeek")
 async def convert_zeek(file: UploadFile = File(...)):
-    suffix = os.path.splitext(file.filename or "")[1] or ".log"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        if len(content) > 50 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
-        tmp.write(content)
-        tmp.flush()
-        tmp_path = tmp.name
-
-    def _cleanup() -> None:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-
-    if not detect_zeek_dns_json(tmp_path):
-        preview_bytes = content[:200]
-        preview = preview_bytes.decode("utf-8-sig", errors="replace").strip()
-        detail = {
-            "error": "Unsupported file or not detected as Zeek DNS JSONL.",
-            "filename": file.filename,
-            "suffix": suffix,
-            "preview": preview,
-        }
-        _cleanup()
-        raise HTTPException(status_code=400, detail=detail)
-
-    def _line_gen():
-        try:
-            yield from convert_zeek_dns_file_to_ocsf_jsonl(tmp_path)
-        finally:
-            _cleanup()
-
-    return StreamingResponse(
-        (line + "\n" for line in _line_gen()),
-        media_type="application/x-ndjson",
-        headers={"Content-Disposition": "attachment; filename=output.zeek.ocsf.jsonl"},
-    )
+    upload = await _read_upload(file)
+    _validate_selected_source("zeek", upload["events"])
+    return _stream_ndjson(upload["events"], "zeek", "output.zeek.ocsf.jsonl")
 
 
 @app.post("/convert/zeek/preview")
 async def convert_zeek_preview(file: UploadFile = File(...)):
-    suffix = os.path.splitext(file.filename or "")[1] or ".log"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        if len(content) > 50 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
-        tmp.write(content)
-        tmp.flush()
-        tmp_path = tmp.name
-    original_text = content.decode("utf-8-sig", errors="replace")
-
-    def _cleanup() -> None:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-
-    if not detect_zeek_dns_json(tmp_path):
-        detail = {
-            "error": "Unsupported file or not detected as Zeek DNS JSONL.",
-            "filename": file.filename,
-            "preview": original_text.strip(),
-        }
-        _cleanup()
-        raise HTTPException(status_code=400, detail=detail)
-
-    try:
-        unified_lines = list(convert_zeek_dns_file_to_ocsf_jsonl(tmp_path))
-        unified_text = "\n".join(unified_lines)
-        return JSONResponse(
-            {
-                "original": original_text,
-                "unified_ndjson": unified_text,
-            }
-        )
-    finally:
-        _cleanup()
+    upload = await _read_upload(file)
+    _validate_selected_source("zeek", upload["events"])
+    unified_lines = list(convert_zeek_dns_events_to_ocsf_jsonl(upload["events"]))
+    detection = _build_detection_payload(
+        "zeek",
+        auto=False,
+        reason="Selected manually.",
+    )
+    return _build_preview_response(
+        original_text=upload["original_text"],
+        unified_lines=unified_lines,
+        detection=detection,
+    )
 
 
 @app.post("/convert/suricata")
 async def convert_suricata(file: UploadFile = File(...)):
-    suffix = os.path.splitext(file.filename or "")[1] or ".json"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        if len(content) > 50 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
-        tmp.write(content)
-        tmp.flush()
-        tmp_path = tmp.name
-
-    def _cleanup() -> None:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-
-    if not detect_suricata_eve_json(tmp_path):
-        preview_bytes = content[:200]
-        preview = preview_bytes.decode("utf-8-sig", errors="replace").strip()
-        detail = {
-            "error": "Unsupported file or not detected as Suricata eve.json JSONL.",
-            "filename": file.filename,
-            "suffix": suffix,
-            "preview": preview,
-        }
-        _cleanup()
-        raise HTTPException(status_code=400, detail=detail)
-
-    def _line_gen():
-        try:
-            yield from convert_suricata_file_to_ocsf_jsonl(tmp_path)
-        finally:
-            _cleanup()
-
-    return StreamingResponse(
-        (line + "\n" for line in _line_gen()),
-        media_type="application/x-ndjson",
-        headers={"Content-Disposition": "attachment; filename=output.suricata.ocsf.jsonl"},
-    )
+    upload = await _read_upload(file)
+    _validate_selected_source("suricata", upload["events"])
+    return _stream_ndjson(upload["events"], "suricata", "output.suricata.ocsf.jsonl")
 
 
 @app.post("/convert/suricata/preview")
 async def convert_suricata_preview(file: UploadFile = File(...)):
-    suffix = os.path.splitext(file.filename or "")[1] or ".json"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        if len(content) > 50 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
-        tmp.write(content)
-        tmp.flush()
-        tmp_path = tmp.name
-    original_text = content.decode("utf-8-sig", errors="replace")
-
-    def _cleanup() -> None:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-
-    if not detect_suricata_eve_json(tmp_path):
-        detail = {
-            "error": "Unsupported file or not detected as Suricata eve.json JSONL.",
-            "filename": file.filename,
-            "preview": original_text.strip(),
-        }
-        _cleanup()
-        raise HTTPException(status_code=400, detail=detail)
-
-    try:
-        unified_lines = list(convert_suricata_file_to_ocsf_jsonl(tmp_path))
-        unified_text = "\n".join(unified_lines)
-        return JSONResponse(
-            {
-                "original": original_text,
-                "unified_ndjson": unified_text,
-            }
-        )
-    finally:
-        _cleanup()
+    upload = await _read_upload(file)
+    _validate_selected_source("suricata", upload["events"])
+    unified_lines = list(convert_suricata_events_to_ocsf_jsonl(upload["events"]))
+    detection = _build_detection_payload(
+        "suricata",
+        auto=False,
+        reason="Selected manually.",
+    )
+    return _build_preview_response(
+        original_text=upload["original_text"],
+        unified_lines=unified_lines,
+        detection=detection,
+    )
 
 
 @app.post("/convert/windows-security")
 async def convert_windows_security(file: UploadFile = File(...)):
-    suffix = os.path.splitext(file.filename or "")[1] or ".json"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        if len(content) > 50 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
-        tmp.write(content)
-        tmp.flush()
-        tmp_path = tmp.name
-
-    def _cleanup() -> None:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-
-    if not detect_windows_security_json(tmp_path):
-        preview_bytes = content[:200]
-        preview = preview_bytes.decode("utf-8-sig", errors="replace").strip()
-        detail = {
-            "error": "Unsupported file or not detected as Windows Security JSON.",
-            "filename": file.filename,
-            "suffix": suffix,
-            "preview": preview,
-        }
-        _cleanup()
-        raise HTTPException(status_code=400, detail=detail)
-
-    def _line_gen():
-        try:
-            yield from convert_windows_security_file_to_ocsf_jsonl(tmp_path)
-        finally:
-            _cleanup()
-
-    return StreamingResponse(
-        (line + "\n" for line in _line_gen()),
-        media_type="application/x-ndjson",
-        headers={"Content-Disposition": "attachment; filename=output.windows-security.ocsf.jsonl"},
+    upload = await _read_upload(file)
+    _validate_selected_source("windows-security", upload["events"])
+    return _stream_ndjson(
+        upload["events"],
+        "windows-security",
+        "output.windows-security.ocsf.jsonl",
     )
 
 
 @app.post("/convert/windows-security/preview")
 async def convert_windows_security_preview(file: UploadFile = File(...)):
-    suffix = os.path.splitext(file.filename or "")[1] or ".json"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        if len(content) > 50 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
-        tmp.write(content)
-        tmp.flush()
-        tmp_path = tmp.name
-    original_text = content.decode("utf-8-sig", errors="replace")
-
-    def _cleanup() -> None:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-
-    if not detect_windows_security_json(tmp_path):
-        detail = {
-            "error": "Unsupported file or not detected as Windows Security JSON.",
-            "filename": file.filename,
-            "preview": original_text.strip(),
-        }
-        _cleanup()
-        raise HTTPException(status_code=400, detail=detail)
-
-    try:
-        unified_lines = list(convert_windows_security_file_to_ocsf_jsonl(tmp_path))
-        unified_text = "\n".join(unified_lines)
-        return JSONResponse(
-            {
-                "original": original_text,
-                "unified_ndjson": unified_text,
-            }
-        )
-    finally:
-        _cleanup()
+    upload = await _read_upload(file)
+    _validate_selected_source("windows-security", upload["events"])
+    unified_lines = list(convert_windows_security_events_to_ocsf_jsonl(upload["events"]))
+    detection = _build_detection_payload(
+        "windows-security",
+        auto=False,
+        reason="Selected manually.",
+    )
+    return _build_preview_response(
+        original_text=upload["original_text"],
+        unified_lines=unified_lines,
+        detection=detection,
+    )
 
 
 @app.post("/convert/file-artifact")
 async def convert_file_artifact(file: UploadFile = File(...)):
-    suffix = os.path.splitext(file.filename or "")[1] or ".json"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        if len(content) > 50 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
-        tmp.write(content)
-        tmp.flush()
-        tmp_path = tmp.name
-
-    def _cleanup() -> None:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
-
-    if not detect_file_artifact_json(tmp_path):
-        preview_bytes = content[:200]
-        preview = preview_bytes.decode("utf-8-sig", errors="replace").strip()
-        detail = {
-            "error": "Unsupported file or not detected as File Artifact JSON.",
-            "filename": file.filename,
-            "suffix": suffix,
-            "preview": preview,
-        }
-        _cleanup()
-        raise HTTPException(status_code=400, detail=detail)
-
-    def _line_gen():
-        try:
-            yield from convert_file_artifact_file_to_ocsf_jsonl(tmp_path)
-        finally:
-            _cleanup()
-
-    return StreamingResponse(
-        (line + "\n" for line in _line_gen()),
-        media_type="application/x-ndjson",
-        headers={"Content-Disposition": "attachment; filename=output.file-artifact.ocsf.jsonl"},
+    upload = await _read_upload(file)
+    _validate_selected_source("file-artifact", upload["events"])
+    return _stream_ndjson(
+        upload["events"],
+        "file-artifact",
+        "output.file-artifact.ocsf.jsonl",
     )
 
 
 @app.post("/convert/file-artifact/preview")
 async def convert_file_artifact_preview(file: UploadFile = File(...)):
-    suffix = os.path.splitext(file.filename or "")[1] or ".json"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        if len(content) > 50 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
-        tmp.write(content)
-        tmp.flush()
-        tmp_path = tmp.name
-    original_text = content.decode("utf-8-sig", errors="replace")
+    upload = await _read_upload(file)
+    _validate_selected_source("file-artifact", upload["events"])
+    unified_lines = list(convert_file_artifact_events_to_ocsf_jsonl(upload["events"]))
+    detection = _build_detection_payload(
+        "file-artifact",
+        auto=False,
+        reason="Selected manually.",
+    )
+    return _build_preview_response(
+        original_text=upload["original_text"],
+        unified_lines=unified_lines,
+        detection=detection,
+    )
 
-    def _cleanup() -> None:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
 
-    if not detect_file_artifact_json(tmp_path):
-        detail = {
-            "error": "Unsupported file or not detected as File Artifact JSON.",
-            "filename": file.filename,
-            "preview": original_text.strip(),
-        }
-        _cleanup()
-        raise HTTPException(status_code=400, detail=detail)
-
-    try:
-        unified_lines = list(convert_file_artifact_file_to_ocsf_jsonl(tmp_path))
-        unified_text = "\n".join(unified_lines)
-        return JSONResponse(
-            {
-                "original": original_text,
-                "unified_ndjson": unified_text,
-            }
+@app.post("/convert/auto")
+async def convert_auto(file: UploadFile = File(...)):
+    upload = await _read_upload(file)
+    detection = auto_detect_source(
+        upload["events"][:DETECTION_SAMPLE_SIZE],
+        threshold=DETECTION_THRESHOLD,
+    )
+    detection["auto"] = True
+    if detection["source_type"] == "unknown":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Unable to confidently auto-detect source.",
+                "detection": detection,
+            },
         )
-    finally:
-        _cleanup()
+    return _stream_ndjson(
+        upload["events"],
+        detection["source_type"],
+        "output.auto.ocsf.jsonl",
+    )
+
+
+@app.post("/convert/auto/preview")
+async def convert_auto_preview(file: UploadFile = File(...)):
+    upload = await _read_upload(file)
+    detection = auto_detect_source(
+        upload["events"][:DETECTION_SAMPLE_SIZE],
+        threshold=DETECTION_THRESHOLD,
+    )
+    detection["auto"] = True
+    if detection["source_type"] == "unknown":
+        return _build_preview_response(
+            original_text=upload["original_text"],
+            unified_lines=[],
+            detection=detection,
+            error="Unable to confidently auto-detect source.",
+        )
+    converter = _get_converter(detection["source_type"])
+    unified_lines = list(converter(upload["events"]))
+    return _build_preview_response(
+        original_text=upload["original_text"],
+        unified_lines=unified_lines,
+        detection=detection,
+    )

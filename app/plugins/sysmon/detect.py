@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, List, Tuple
 
 def detect_sysmon_json(file_path: str) -> bool:
     """
@@ -77,3 +77,34 @@ def detect_sysmon_json(file_path: str) -> bool:
         return False
     except Exception:
         return False
+
+
+def score_events(events: List[dict]) -> Tuple[float, str]:
+    if not events:
+        return 0.0, "No events provided for detection."
+
+    total = 0
+    matched = 0
+    with_metadata = 0
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        total += 1
+        if any(key in ev for key in ("EventID", "EventId", "event_id")):
+            matched += 1
+            if isinstance(ev.get("EventData"), dict) or any(
+                key in ev for key in ("UtcTime", "TimeCreated", "Timestamp")
+            ):
+                with_metadata += 1
+
+    if total == 0:
+        return 0.0, "No JSON objects to score."
+
+    score = matched / total
+    if matched and with_metadata:
+        score = min(1.0, score + 0.2)
+
+    reason = f"Matched {matched}/{total} events with Sysmon-style EventID keys."
+    if with_metadata:
+        reason += " EventData/UtcTime fields present."
+    return score, reason

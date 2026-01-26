@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 
 @dataclass
@@ -59,6 +59,18 @@ def _extract_fields(ev: Dict[str, Any]) -> ZeekDNSNormalized:
         rcode_name=str(rcode_name) if rcode_name is not None else None,
         original_event=dict(ev),
     )
+
+
+def normalize_zeek_dns_event(ev: Dict[str, Any]) -> ZeekDNSNormalized:
+    return _extract_fields(ev)
+
+
+def iter_zeek_dns_events_from_events(
+    events: Iterable[Dict[str, Any]],
+) -> Iterator[ZeekDNSNormalized]:
+    for ev in events:
+        if isinstance(ev, dict):
+            yield _extract_fields(ev)
 
 
 def iter_zeek_dns_events(file_path: str) -> Iterator[ZeekDNSNormalized]:

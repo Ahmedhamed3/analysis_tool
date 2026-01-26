@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, List, Tuple
 
 
 def detect_suricata_eve_json(file_path: str) -> bool:
@@ -35,3 +35,36 @@ def detect_suricata_eve_json(file_path: str) -> bool:
         return False
     except Exception:
         return False
+
+
+def score_events(events: List[dict]) -> Tuple[float, str]:
+    if not events:
+        return 0.0, "No events provided for detection."
+
+    total = 0
+    alert_matches = 0
+    event_type_matches = 0
+    alert_block = 0
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        total += 1
+        if "event_type" in ev:
+            event_type_matches += 1
+            if ev.get("event_type") == "alert":
+                alert_matches += 1
+        if isinstance(ev.get("alert"), dict):
+            alert_block += 1
+
+    if total == 0:
+        return 0.0, "No JSON objects to score."
+
+    score = alert_matches / total
+    if alert_matches and alert_block:
+        score = min(1.0, score + 0.2)
+
+    reason = (
+        f"Matched {alert_matches}/{total} events with event_type=alert "
+        f"({event_type_matches} had event_type key)."
+    )
+    return score, reason
