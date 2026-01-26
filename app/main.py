@@ -5,9 +5,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from app.plugins.sysmon.detect import detect_sysmon_json
 from app.plugins.sysmon.pipeline import convert_sysmon_file_to_ocsf_jsonl
+from app.plugins.zeek.detect import detect_zeek_dns_json
+from app.plugins.zeek.pipeline import convert_zeek_dns_file_to_ocsf_jsonl
 
 app = FastAPI(
-    title="Sysmon → OCSF Converter (MVP)",
+    title="Log → OCSF Converter (MVP)",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -18,7 +20,7 @@ HTML_PAGE = """<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Sysmon → OCSF Converter</title>
+    <title>Log → OCSF Converter</title>
     <style>
       body {
         font-family: Arial, sans-serif;
@@ -32,6 +34,12 @@ HTML_PAGE = """<!doctype html>
         gap: 12px;
         align-items: center;
         margin-bottom: 16px;
+      }
+      select {
+        padding: 6px 10px;
+        border-radius: 6px;
+        border: 1px solid #cbd2d9;
+        background: #fff;
       }
       button {
         padding: 8px 12px;
@@ -84,6 +92,10 @@ HTML_PAGE = """<!doctype html>
   <body>
     <div class="controls">
       <input type="file" id="fileInput" />
+      <select id="sourceSelect">
+        <option value="sysmon">Sysmon</option>
+        <option value="zeek">Zeek DNS</option>
+      </select>
       <button class="primary" id="previewBtn">Convert</button>
     </div>
     <div class="pane-grid">
@@ -99,6 +111,7 @@ HTML_PAGE = """<!doctype html>
     <script>
       const fileInput = document.getElementById("fileInput");
       const previewBtn = document.getElementById("previewBtn");
+      const sourceSelect = document.getElementById("sourceSelect");
       const originalPane = document.getElementById("originalPane");
       const unifiedPane = document.getElementById("unifiedPane");
 
@@ -109,7 +122,9 @@ HTML_PAGE = """<!doctype html>
         }
         const formData = new FormData();
         formData.append("file", file);
-        const response = await fetch("/convert/sysmon/preview", {
+        const endpoint =
+          sourceSelect.value === "zeek" ? "/convert/zeek/preview" : "/convert/sysmon/preview";
+        const response = await fetch(endpoint, {
           method: "POST",
           body: formData,
         });
@@ -209,6 +224,88 @@ async def convert_sysmon_preview(file: UploadFile = File(...)):
 
     try:
         unified_lines = list(convert_sysmon_file_to_ocsf_jsonl(tmp_path))
+        unified_text = "\n".join(unified_lines)
+        return JSONResponse(
+            {
+                "original": original_text,
+                "unified_ndjson": unified_text,
+            }
+        )
+    finally:
+        _cleanup()
+
+
+@app.post("/convert/zeek")
+async def convert_zeek(file: UploadFile = File(...)):
+    suffix = os.path.splitext(file.filename or "")[1] or ".log"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        content = await file.read()
+        if len(content) > 50 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
+        tmp.write(content)
+        tmp.flush()
+        tmp_path = tmp.name
+
+    def _cleanup() -> None:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+    if not detect_zeek_dns_json(tmp_path):
+        preview_bytes = content[:200]
+        preview = preview_bytes.decode("utf-8-sig", errors="replace").strip()
+        detail = {
+            "error": "Unsupported file or not detected as Zeek DNS JSONL.",
+            "filename": file.filename,
+            "suffix": suffix,
+            "preview": preview,
+        }
+        _cleanup()
+        raise HTTPException(status_code=400, detail=detail)
+
+    def _line_gen():
+        try:
+            yield from convert_zeek_dns_file_to_ocsf_jsonl(tmp_path)
+        finally:
+            _cleanup()
+
+    return StreamingResponse(
+        (line + "\n" for line in _line_gen()),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": "attachment; filename=output.zeek.ocsf.jsonl"},
+    )
+
+
+@app.post("/convert/zeek/preview")
+async def convert_zeek_preview(file: UploadFile = File(...)):
+    suffix = os.path.splitext(file.filename or "")[1] or ".log"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        content = await file.read()
+        if len(content) > 50 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
+        tmp.write(content)
+        tmp.flush()
+        tmp_path = tmp.name
+    original_text = content.decode("utf-8-sig", errors="replace")
+
+    def _cleanup() -> None:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+    if not detect_zeek_dns_json(tmp_path):
+        detail = {
+            "error": "Unsupported file or not detected as Zeek DNS JSONL.",
+            "filename": file.filename,
+            "preview": original_text.strip(),
+        }
+        _cleanup()
+        raise HTTPException(status_code=400, detail=detail)
+
+    try:
+        unified_lines = list(convert_zeek_dns_file_to_ocsf_jsonl(tmp_path))
         unified_text = "\n".join(unified_lines)
         return JSONResponse(
             {
