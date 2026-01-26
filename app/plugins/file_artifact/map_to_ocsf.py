@@ -46,6 +46,25 @@ def map_file_artifact_to_ocsf(ev: FileArtifactNormalized) -> Dict[str, Any]:
     if ev.file_size is not None:
         file_obj["size"] = ev.file_size
 
+    device_obj: Dict[str, Any] = {}
+    if ev.device_hostname:
+        device_obj["hostname"] = ev.device_hostname
+
+    actor_obj: Dict[str, Any] = {}
+    if ev.user_name:
+        user_obj: Dict[str, Any] = {"name": ev.user_name}
+        if ev.user_domain:
+            user_obj["domain"] = ev.user_domain
+        actor_obj["user"] = user_obj
+
+    if ev.process_pid is not None or ev.process_executable:
+        process_obj: Dict[str, Any] = {}
+        if ev.process_pid is not None:
+            process_obj["pid"] = ev.process_pid
+        if ev.process_executable:
+            process_obj["executable"] = ev.process_executable
+        actor_obj["process"] = process_obj
+
     ocsf_event: Dict[str, Any] = {
         "activity_id": FILE_ACTIVITY_OBSERVED_ID,
         "class_uid": FILE_ACTIVITY_CLASS_UID,
@@ -57,5 +76,9 @@ def map_file_artifact_to_ocsf(ev: FileArtifactNormalized) -> Dict[str, Any]:
         "file": file_obj,
         "unmapped": {"original_event": ev.original_event},
     }
+    if device_obj:
+        ocsf_event["device"] = device_obj
+    if actor_obj:
+        ocsf_event["actor"] = actor_obj
 
     return ocsf_event

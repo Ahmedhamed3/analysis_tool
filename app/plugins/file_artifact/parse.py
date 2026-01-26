@@ -14,6 +14,11 @@ class FileArtifactNormalized:
     md5: Optional[str]
     file_size: Optional[int]
     source: Optional[str]
+    device_hostname: Optional[str]
+    user_name: Optional[str]
+    user_domain: Optional[str]
+    process_pid: Optional[int]
+    process_executable: Optional[str]
     original_event: dict[str, Any]
 
 
@@ -60,6 +65,15 @@ def _extract_fields(record: dict[str, Any]) -> FileArtifactNormalized:
         or normalized.get("tool")
         or normalized.get("product")
     )
+    device_hostname = _as_str(
+        normalized.get("hostname") or normalized.get("device_hostname")
+    )
+    user_name = _as_str(normalized.get("username") or normalized.get("user_name"))
+    user_domain = _as_str(normalized.get("user_domain") or normalized.get("domain"))
+    process_pid = _as_int(normalized.get("process_pid"))
+    process_executable = _as_str(
+        normalized.get("process_executable") or normalized.get("process_image")
+    )
 
     return FileArtifactNormalized(
         timestamp=timestamp,
@@ -70,6 +84,11 @@ def _extract_fields(record: dict[str, Any]) -> FileArtifactNormalized:
         md5=md5,
         file_size=file_size,
         source=source,
+        device_hostname=device_hostname,
+        user_name=user_name,
+        user_domain=user_domain,
+        process_pid=process_pid,
+        process_executable=process_executable,
         original_event=dict(record),
     )
 
