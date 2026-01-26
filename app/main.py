@@ -11,6 +11,8 @@ from app.plugins.zeek.detect import detect_zeek_dns_json
 from app.plugins.zeek.pipeline import convert_zeek_dns_file_to_ocsf_jsonl
 from app.plugins.windows_security.detect import detect_windows_security_json
 from app.plugins.windows_security.pipeline import convert_windows_security_file_to_ocsf_jsonl
+from app.plugins.file_artifact.detect import detect_file_artifact_json
+from app.plugins.file_artifact.pipeline import convert_file_artifact_file_to_ocsf_jsonl
 
 app = FastAPI(
     title="Log → OCSF Converter (MVP)",
@@ -101,6 +103,7 @@ HTML_PAGE = """<!doctype html>
         <option value="zeek">Zeek DNS</option>
         <option value="suricata">Suricata Alerts</option>
         <option value="windows-security">Windows Security</option>
+        <option value="file-artifact">File Artifact</option>
       </select>
       <button class="primary" id="previewBtn">Convert</button>
     </div>
@@ -135,6 +138,8 @@ HTML_PAGE = """<!doctype html>
           endpoint = "/convert/suricata/preview";
         } else if (sourceSelect.value === "windows-security") {
           endpoint = "/convert/windows-security/preview";
+        } else if (sourceSelect.value === "file-artifact") {
+          endpoint = "/convert/file-artifact/preview";
         }
         const response = await fetch(endpoint, {
           method: "POST",
@@ -482,6 +487,88 @@ async def convert_windows_security_preview(file: UploadFile = File(...)):
 
     try:
         unified_lines = list(convert_windows_security_file_to_ocsf_jsonl(tmp_path))
+        unified_text = "\n".join(unified_lines)
+        return JSONResponse(
+            {
+                "original": original_text,
+                "unified_ndjson": unified_text,
+            }
+        )
+    finally:
+        _cleanup()
+
+
+@app.post("/convert/file-artifact")
+async def convert_file_artifact(file: UploadFile = File(...)):
+    suffix = os.path.splitext(file.filename or "")[1] or ".json"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        content = await file.read()
+        if len(content) > 50 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
+        tmp.write(content)
+        tmp.flush()
+        tmp_path = tmp.name
+
+    def _cleanup() -> None:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+    if not detect_file_artifact_json(tmp_path):
+        preview_bytes = content[:200]
+        preview = preview_bytes.decode("utf-8-sig", errors="replace").strip()
+        detail = {
+            "error": "Unsupported file or not detected as File Artifact JSON.",
+            "filename": file.filename,
+            "suffix": suffix,
+            "preview": preview,
+        }
+        _cleanup()
+        raise HTTPException(status_code=400, detail=detail)
+
+    def _line_gen():
+        try:
+            yield from convert_file_artifact_file_to_ocsf_jsonl(tmp_path)
+        finally:
+            _cleanup()
+
+    return StreamingResponse(
+        (line + "\n" for line in _line_gen()),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": "attachment; filename=output.file-artifact.ocsf.jsonl"},
+    )
+
+
+@app.post("/convert/file-artifact/preview")
+async def convert_file_artifact_preview(file: UploadFile = File(...)):
+    suffix = os.path.splitext(file.filename or "")[1] or ".json"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        content = await file.read()
+        if len(content) > 50 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="File too large (max 50MB for MVP).")
+        tmp.write(content)
+        tmp.flush()
+        tmp_path = tmp.name
+    original_text = content.decode("utf-8-sig", errors="replace")
+
+    def _cleanup() -> None:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+    if not detect_file_artifact_json(tmp_path):
+        detail = {
+            "error": "Unsupported file or not detected as File Artifact JSON.",
+            "filename": file.filename,
+            "preview": original_text.strip(),
+        }
+        _cleanup()
+        raise HTTPException(status_code=400, detail=detail)
+
+    try:
+        unified_lines = list(convert_file_artifact_file_to_ocsf_jsonl(tmp_path))
         unified_text = "\n".join(unified_lines)
         return JSONResponse(
             {
