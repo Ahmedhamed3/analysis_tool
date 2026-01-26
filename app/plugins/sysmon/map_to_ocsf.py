@@ -20,6 +20,8 @@ NETWORK_ACTIVITY_OPEN_ID = 1
 NETWORK_ACTIVITY_OPEN_TYPE_UID = 400101
 FILE_SYSTEM_ACTIVITY_CLASS_UID = 1001
 FILE_SYSTEM_ACTIVITY_CREATE_ID = 1
+DNS_ACTIVITY_CLASS_UID = 1006
+DNS_ACTIVITY_QUERY_ID = 1
 
 def _basename(path: Optional[str]) -> Optional[str]:
     if not path:
@@ -233,6 +235,64 @@ def map_sysmon_eventid11_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any
 
     if file_obj:
         ocsf_event["file"] = file_obj
+    if unmapped:
+        ocsf_event["unmapped"] = unmapped
+
+    return ocsf_event
+
+
+def map_sysmon_eventid22_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]]:
+    """
+    Maps ONLY Sysmon EventID 22 (DNS Query) -> OCSF DNS Activity Query.
+    Returns None if event is not EventID 22.
+    """
+    if ev.event_id != 22:
+        return None
+
+    type_uid = calc_type_uid(DNS_ACTIVITY_CLASS_UID, DNS_ACTIVITY_QUERY_ID)
+
+    query_name = _event_data_value(ev.event_data, "QueryName") or ev.query_name
+    query_results = _event_data_value(ev.event_data, "QueryResults") or ev.query_results
+    process_image = _event_data_value(ev.event_data, "Image") or ev.image
+    process_id = _event_data_value(ev.event_data, "ProcessId") or ev.pid
+
+    dns: Dict[str, Any] = {}
+    if query_name:
+        dns["question"] = {"name": query_name}
+    if query_results:
+        dns["answers"] = [{"data": query_results}]
+
+    actor: Dict[str, Any] = {}
+    process: Dict[str, Any] = {}
+    if process_image:
+        process["executable"] = process_image
+    pid = _safe_int(process_id)
+    if pid is not None:
+        process["pid"] = pid
+    if process:
+        actor["process"] = process
+    if ev.user:
+        actor["user"] = {"name": ev.user}
+
+    unmapped: Dict[str, Any] = {}
+    if ev.event_data:
+        unmapped["original_event"] = ev.event_data
+
+    ocsf_event: Dict[str, Any] = {
+        "activity_id": DNS_ACTIVITY_QUERY_ID,
+        "class_uid": DNS_ACTIVITY_CLASS_UID,
+        "type_uid": type_uid,
+        "time": ev.ts,
+        "severity_id": DEFAULT_SEVERITY_ID,
+        "metadata": {
+            "product": DEFAULT_METADATA_PRODUCT,
+            "version": DEFAULT_METADATA_VERSION,
+        },
+        "actor": actor if actor else {"app_name": "unknown"},
+    }
+
+    if dns:
+        ocsf_event["dns"] = dns
     if unmapped:
         ocsf_event["unmapped"] = unmapped
 
