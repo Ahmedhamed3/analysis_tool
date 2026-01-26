@@ -1,8 +1,11 @@
 import os
 import tempfile
+from typing import Any, Dict, List, Optional
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
+from app.correlation.process_chain import build_process_chains
 from app.plugins.sysmon.detect import detect_sysmon_json
 from app.plugins.sysmon.pipeline import convert_sysmon_file_to_ocsf_jsonl
 from app.plugins.suricata.detect import detect_suricata_eve_json
@@ -80,6 +83,51 @@ HTML_PAGE = """<!doctype html>
         text-transform: uppercase;
         letter-spacing: 0.04em;
       }
+      .panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .chain-results {
+        flex: 1;
+        overflow: auto;
+        padding-right: 4px;
+      }
+      .chain-card {
+        border: 1px solid #e4e7eb;
+        border-radius: 8px;
+        padding: 8px 12px;
+        background: #f9fafb;
+        margin-bottom: 12px;
+      }
+      .chain-card summary {
+        cursor: pointer;
+        font-weight: 600;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .chain-meta {
+        font-size: 12px;
+        color: #52606d;
+      }
+      .chain-events {
+        list-style: none;
+        padding: 0;
+        margin: 12px 0 0 0;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .chain-event {
+        border-left: 3px solid #2563eb;
+        padding-left: 10px;
+        font-size: 12px;
+      }
+      .chain-event strong {
+        font-size: 13px;
+      }
       pre {
         flex: 1;
         margin: 0;
@@ -116,13 +164,93 @@ HTML_PAGE = """<!doctype html>
         <h2>Unified Logs (OCSF)</h2>
         <pre id="unifiedPane"></pre>
       </div>
+      <div class="pane">
+        <div class="panel-header">
+          <h2>Process Behavior Chains</h2>
+          <button id="correlateBtn">Correlate Processes</button>
+        </div>
+        <div class="chain-results" id="chainsContainer"></div>
+      </div>
     </div>
     <script>
       const fileInput = document.getElementById("fileInput");
       const previewBtn = document.getElementById("previewBtn");
+      const correlateBtn = document.getElementById("correlateBtn");
       const sourceSelect = document.getElementById("sourceSelect");
       const originalPane = document.getElementById("originalPane");
       const unifiedPane = document.getElementById("unifiedPane");
+      const chainsContainer = document.getElementById("chainsContainer");
+      let cachedOcsfEvents = [];
+
+      function parseNdjson(value) {
+        if (!value) {
+          return [];
+        }
+        const lines = value.split("\\n").map((line) => line.trim()).filter(Boolean);
+        const events = [];
+        for (const line of lines) {
+          try {
+            events.push(JSON.parse(line));
+          } catch (error) {
+            console.warn("Failed to parse line", error);
+          }
+        }
+        return events;
+      }
+
+      function renderChains(chains) {
+        chainsContainer.innerHTML = "";
+        if (!chains || chains.length === 0) {
+          const empty = document.createElement("div");
+          empty.textContent = "No process chains to display.";
+          empty.className = "chain-meta";
+          chainsContainer.appendChild(empty);
+          return;
+        }
+        chains.forEach((chain) => {
+          const details = document.createElement("details");
+          details.className = "chain-card";
+          details.open = true;
+
+          const summary = document.createElement("summary");
+          summary.innerHTML = `<span>${chain.process_uid}</span>`;
+
+          const meta = document.createElement("span");
+          meta.className = "chain-meta";
+          const parent = chain.parent_process_uid ? chain.parent_process_uid : "None";
+          meta.textContent = `Parent: ${parent} · Events: ${chain.event_count}`;
+          summary.appendChild(meta);
+
+          details.appendChild(summary);
+
+          const list = document.createElement("ul");
+          list.className = "chain-events";
+
+          chain.events.forEach((event) => {
+            const item = document.createElement("li");
+            item.className = "chain-event";
+            const activity = event.activity_id ?? "n/a";
+            const typeUid = event.type_uid ?? "n/a";
+            const command = event.command_line ? event.command_line : "—";
+            const executable = event.executable ? event.executable : "Unknown executable";
+            const time = event.time ? event.time : "Unknown time";
+            const target = event.target_process
+              ? `Target: ${event.target_process.executable || "Unknown"} (${event.target_process.uid || "n/a"})`
+              : "";
+
+            item.innerHTML = `
+              <div><strong>${time}</strong> · Activity ${activity} / Type ${typeUid}</div>
+              <div>${executable}</div>
+              <div>${command}</div>
+              ${target ? `<div>${target}</div>` : ""}
+            `;
+            list.appendChild(item);
+          });
+
+          details.appendChild(list);
+          chainsContainer.appendChild(details);
+        });
+      }
 
       async function postPreview() {
         const file = fileInput.files[0];
@@ -154,9 +282,31 @@ HTML_PAGE = """<!doctype html>
         const data = await response.json();
         originalPane.textContent = data.original;
         unifiedPane.textContent = data.unified_ndjson;
+        cachedOcsfEvents = parseNdjson(data.unified_ndjson);
+        renderChains([]);
+      }
+
+      async function correlateProcesses() {
+        if (!cachedOcsfEvents.length) {
+          renderChains([]);
+          return;
+        }
+        const response = await fetch("/correlate/process-chains", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(cachedOcsfEvents),
+        });
+        if (!response.ok) {
+          const detail = await response.text();
+          chainsContainer.textContent = detail;
+          return;
+        }
+        const data = await response.json();
+        renderChains(data);
       }
 
       previewBtn.addEventListener("click", postPreview);
+      correlateBtn.addEventListener("click", correlateProcesses);
     </script>
   </body>
 </html>
@@ -166,6 +316,58 @@ HTML_PAGE = """<!doctype html>
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return HTML_PAGE
+
+
+def _extract_actor_process(event: Dict[str, Any]) -> Dict[str, Any]:
+    actor = event.get("actor", {})
+    if isinstance(actor, dict):
+        process = actor.get("process", {})
+        if isinstance(process, dict):
+            return process
+    return {}
+
+
+def _extract_target_process(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    target = event.get("process", {})
+    if not isinstance(target, dict):
+        return None
+    if not any(target.get(key) for key in ("uid", "executable", "command_line")):
+        return None
+    return {
+        "uid": target.get("uid"),
+        "executable": target.get("executable"),
+        "command_line": target.get("command_line"),
+    }
+
+
+def _format_chain_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    actor_process = _extract_actor_process(event)
+    formatted = {
+        "time": event.get("time"),
+        "activity_id": event.get("activity_id"),
+        "type_uid": event.get("type_uid"),
+        "executable": actor_process.get("executable"),
+        "command_line": actor_process.get("command_line"),
+    }
+    target_process = _extract_target_process(event)
+    if target_process:
+        formatted["target_process"] = target_process
+    return formatted
+
+
+def _format_chain(chain) -> Dict[str, Any]:
+    return {
+        "process_uid": chain.process_uid,
+        "parent_process_uid": chain.parent_process_uid,
+        "event_count": len(chain.events),
+        "events": [_format_chain_event(event) for event in chain.events],
+    }
+
+
+@app.post("/correlate/process-chains")
+async def correlate_process_chains(events: List[Dict[str, Any]]):
+    chains = build_process_chains(events)
+    return JSONResponse([_format_chain(chain) for chain in chains])
 
 @app.post("/convert/sysmon")
 async def convert_sysmon(file: UploadFile = File(...)):
