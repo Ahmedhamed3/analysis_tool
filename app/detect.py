@@ -90,3 +90,71 @@ def detect_event(
         "confidence": best_confidence,
         "reason": best_reason,
     }
+
+
+def summarize_event_detection(
+    events: List[dict],
+    *,
+    threshold: float = 0.6,
+    mixed_ratio_threshold: float = 0.85,
+) -> Dict[str, object]:
+    if not events:
+        return {
+            "source_type": "unknown",
+            "confidence": 0.0,
+            "reason": "No events provided for detection.",
+            "breakdown": [],
+        }
+
+    counts = {source_type: 0 for source_type in SCORE_FUNCS}
+    counts["unknown"] = 0
+    for event in events:
+        detection = detect_event(event, threshold=threshold)
+        source_type = detection.get("source_type", "unknown")
+        if source_type not in counts:
+            counts[source_type] = 0
+        counts[source_type] += 1
+
+    total = len(events)
+    breakdown = []
+    for source_type, count in counts.items():
+        ratio = count / total if total else 0.0
+        breakdown.append(
+            {
+                "source": source_type,
+                "count": count,
+                "total": total,
+                "ratio": ratio,
+            }
+        )
+
+    breakdown.sort(key=lambda item: (item["count"], item["source"]), reverse=True)
+    top = max(counts.items(), key=lambda item: item[1])
+    top_source, top_count = top
+    top_ratio = top_count / total if total else 0.0
+
+    if top_ratio >= mixed_ratio_threshold:
+        reason = (
+            f"Per-event detection matched {top_source} for {top_count}/{total} events."
+        )
+        return {
+            "source_type": top_source,
+            "confidence": top_ratio,
+            "reason": reason,
+            "breakdown": breakdown,
+        }
+
+    summary = ", ".join(
+        f"{item['source']}={item['count']}" for item in breakdown
+    )
+    reason = (
+        "Mixed-source file: per-event detection found multiple sources. "
+        "Conversion routed events per source. "
+        f"{summary}"
+    )
+    return {
+        "source_type": "mixed",
+        "confidence": 1.0,
+        "reason": reason,
+        "breakdown": breakdown,
+    }
