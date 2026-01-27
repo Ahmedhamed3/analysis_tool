@@ -1,5 +1,6 @@
 from typing import Dict, List
 
+from app.formats.reader import PARSE_ERROR_KEY
 from app.plugins.file_artifact.detect import score_events as score_file_artifact
 from app.plugins.azure_ad_signin.detect import score_events as score_azure_ad_signin
 from app.plugins.suricata.detect import score_events as score_suricata
@@ -67,6 +68,12 @@ def detect_event(
             "source_type": "unknown",
             "confidence": 0.0,
             "reason": "No event provided for detection.",
+        }
+    if PARSE_ERROR_KEY in event:
+        return {
+            "source_type": "unknown",
+            "confidence": 0.0,
+            "reason": "Parse error event.",
         }
 
     scored = []

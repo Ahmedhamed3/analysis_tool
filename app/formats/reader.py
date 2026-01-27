@@ -2,21 +2,28 @@ import json
 from json import JSONDecodeError
 from typing import Iterable, Iterator, List
 
-from fastapi import HTTPException
-
-
 WRAPPER_KEYS = ("Events", "events", "records")
+PARSE_ERROR_KEY = "__parse_error__"
+
+
+def _build_parse_error_event(*, raw_line: str, error: str) -> dict:
+    return {
+        PARSE_ERROR_KEY: {
+            "raw_line": raw_line,
+            "error": error,
+        }
+    }
 
 
 def _ensure_dict_list(items: Iterable[object]) -> List[dict]:
     events: List[dict] = []
     for idx, item in enumerate(items):
-        if not isinstance(item, dict):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Expected JSON object at index {idx}, got {type(item).__name__}.",
-            )
-        events.append(item)
+        if isinstance(item, dict):
+            events.append(item)
+            continue
+        error = f"Expected JSON object at index {idx}, got {type(item).__name__}."
+        raw_line = json.dumps(item, ensure_ascii=False)
+        events.append(_build_parse_error_event(raw_line=raw_line, error=error))
     return events
 
 
@@ -29,10 +36,9 @@ def _unwrap_events(obj: object) -> List[dict]:
             if isinstance(value, list):
                 return _ensure_dict_list(value)
         return [obj]
-    raise HTTPException(
-        status_code=400,
-        detail="Top-level JSON must be an object or array of objects.",
-    )
+    error = "Top-level JSON must be an object or array of objects."
+    raw_line = json.dumps(obj, ensure_ascii=False)
+    return [_build_parse_error_event(raw_line=raw_line, error=error)]
 
 
 def _iter_ndjson(text: str) -> Iterator[dict]:
@@ -43,15 +49,13 @@ def _iter_ndjson(text: str) -> Iterator[dict]:
         try:
             value = json.loads(line)
         except JSONDecodeError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Malformed NDJSON at line {line_no}: {exc.msg}.",
-            ) from exc
+            error = f"Malformed NDJSON at line {line_no}: {exc.msg}."
+            yield _build_parse_error_event(raw_line=raw_line, error=error)
+            continue
         if not isinstance(value, dict):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Expected JSON object at line {line_no}, got {type(value).__name__}.",
-            )
+            error = f"Expected JSON object at line {line_no}, got {type(value).__name__}."
+            yield _build_parse_error_event(raw_line=raw_line, error=error)
+            continue
         yield value
 
 
@@ -69,10 +73,8 @@ def iter_events_from_upload(file_bytes: bytes) -> Iterable[dict]:
         try:
             payload = json.loads(stripped)
         except JSONDecodeError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Malformed JSON array: {exc.msg}.",
-            ) from exc
+            error = f"Malformed JSON array: {exc.msg}."
+            return iter([_build_parse_error_event(raw_line=text, error=error)])
         return iter(_unwrap_events(payload))
 
     if first_char == "{":

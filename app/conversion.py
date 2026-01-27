@@ -1,8 +1,20 @@
 import json
-from typing import Iterable, Iterator
+from datetime import datetime, timezone
+from typing import Iterable, Iterator, Optional
 
 from app.detect import detect_event
-from app.ocsf.unknown import map_unknown_event_to_ocsf
+from app.formats.reader import PARSE_ERROR_KEY
+from app.ocsf.constants import (
+    AUTHENTICATION_ACTIVITY_CLASS_UID,
+    FILE_SYSTEM_ACTIVITY_CLASS_UID,
+    FILE_SYSTEM_ACTIVITY_CREATE_ID,
+    FILE_SYSTEM_ACTIVITY_DELETE_ID,
+    FILE_SYSTEM_ACTIVITY_MODIFY_ID,
+    FILE_SYSTEM_ACTIVITY_READ_ID,
+    PROCESS_ACTIVITY_CLASS_UID,
+    SECURITY_FINDING_CLASS_UID,
+)
+from app.ocsf.unknown import map_parse_error_to_ocsf, map_unknown_event_to_ocsf
 from app.plugins.azure_ad_signin.pipeline import convert_azure_ad_signin_events_to_ocsf_jsonl
 from app.plugins.file_artifact.pipeline import convert_file_artifact_events_to_ocsf_jsonl
 from app.plugins.suricata.pipeline import convert_suricata_events_to_ocsf_jsonl
@@ -35,29 +47,229 @@ def _ensure_unmapped_original(event: dict, mapped: dict) -> dict:
     return mapped
 
 
+def _current_ingestion_time() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _ensure_unmapped(mapped: dict) -> dict:
+    unmapped = mapped.get("unmapped")
+    if not isinstance(unmapped, dict):
+        unmapped = {}
+        mapped["unmapped"] = unmapped
+    return unmapped
+
+
+def _is_valid_iso8601_z(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    if not value.endswith("Z"):
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return False
+    return True
+
+
+def _ensure_time(event: dict, *, ingestion_time: str) -> None:
+    if _is_valid_iso8601_z(event.get("time")):
+        return
+    event["time"] = ingestion_time
+    unmapped = _ensure_unmapped(event)
+    unmapped["time_parse_error"] = True
+
+
+def _extract_original_event_id(original_event: object) -> Optional[int]:
+    if not isinstance(original_event, dict):
+        return None
+    value = original_event.get("EventID")
+    if value is None:
+        value = original_event.get("event_id")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _derive_evidence_flags(event: dict) -> dict:
+    metadata = event.get("metadata") or {}
+    product = metadata.get("product")
+    class_uid = event.get("class_uid")
+    activity_id = event.get("activity_id")
+
+    actor = event.get("actor") or {}
+    actor_process = actor.get("process") or {}
+    file_obj = event.get("file") or {}
+    file_hash = file_obj.get("hash") or {}
+    dns_obj = event.get("dns") or {}
+    http_obj = event.get("http") or {}
+    auth_obj = event.get("auth")
+
+    unmapped = event.get("unmapped") or {}
+    original_event = unmapped.get("original_event")
+    original_event_id = _extract_original_event_id(original_event)
+
+    process_execution = (
+        class_uid == PROCESS_ACTIVITY_CLASS_UID
+        or bool(actor_process.get("command_line") or actor_process.get("executable"))
+    )
+
+    file_create = (
+        class_uid == FILE_SYSTEM_ACTIVITY_CLASS_UID
+        and activity_id == FILE_SYSTEM_ACTIVITY_CREATE_ID
+    )
+    if not file_create and file_obj.get("path") and original_event_id == 11:
+        file_create = True
+
+    file_access = (
+        class_uid == FILE_SYSTEM_ACTIVITY_CLASS_UID
+        and activity_id in {
+            FILE_SYSTEM_ACTIVITY_READ_ID,
+            FILE_SYSTEM_ACTIVITY_MODIFY_ID,
+            FILE_SYSTEM_ACTIVITY_DELETE_ID,
+        }
+    )
+    if not file_access and original_event_id == 4663:
+        file_access = True
+
+    file_hash_present = bool(file_hash.get("sha256") or file_hash.get("md5"))
+
+    dns_present = bool(dns_obj.get("question") or dns_obj.get("answers"))
+    http_present = bool(http_obj.get("url") or http_obj.get("method"))
+
+    identity_present = bool(auth_obj) or class_uid == AUTHENTICATION_ACTIVITY_CLASS_UID
+
+    alert_present = class_uid == SECURITY_FINDING_CLASS_UID
+
+    unknown_present = product == "Unknown"
+    parse_error_present = product == "ParseError"
+
+    return {
+        "process_execution": process_execution,
+        "file_create": file_create,
+        "file_hash": file_hash_present,
+        "file_access": file_access,
+        "dns": dns_present,
+        "http": http_present,
+        "identity": identity_present,
+        "alert": alert_present,
+        "unknown": unknown_present,
+        "parse_error": parse_error_present,
+    }
+
+
+def _derive_context_flags(event: dict) -> dict:
+    actor = event.get("actor") or {}
+    actor_user = actor.get("user") or {}
+    actor_process = actor.get("process") or {}
+    file_obj = event.get("file") or {}
+    device = event.get("device") or {}
+
+    network = event.get("network") or {}
+    network_src = network.get("src_endpoint") or {}
+    network_dst = network.get("dst_endpoint") or {}
+    src_endpoint = event.get("src_endpoint") or {}
+    dst_endpoint = event.get("dst_endpoint") or {}
+
+    has_user = bool(actor_user.get("name") or actor_user.get("uid"))
+    has_process = bool(
+        actor_process.get("pid")
+        or actor_process.get("executable")
+        or actor_process.get("uid")
+    )
+    has_file = bool(file_obj.get("path") or file_obj.get("name"))
+    has_ip = bool(
+        network_src.get("ip")
+        or network_dst.get("ip")
+        or src_endpoint.get("ip")
+        or dst_endpoint.get("ip")
+    )
+    has_device = bool(device.get("hostname"))
+
+    return {
+        "has_user": has_user,
+        "has_process": has_process,
+        "has_file": has_file,
+        "has_ip": has_ip,
+        "has_device": has_device,
+    }
+
+
+def _apply_post_processing(event: dict, *, ingestion_time: str) -> dict:
+    _ensure_time(event, ingestion_time=ingestion_time)
+    event["evidence_flags"] = _derive_evidence_flags(event)
+    event["context_flags"] = _derive_context_flags(event)
+    return event
+
+
+def _map_event_with_source(event: dict, *, source_type: str, ingestion_time: str) -> dict:
+    if PARSE_ERROR_KEY in event:
+        payload = event.get(PARSE_ERROR_KEY) or {}
+        raw_line = payload.get("raw_line", "")
+        error = payload.get("error", "Parse error")
+        mapped = map_parse_error_to_ocsf(
+            raw_line=raw_line,
+            error_message=error,
+            ingestion_time=ingestion_time,
+        )
+        return _apply_post_processing(mapped, ingestion_time=ingestion_time)
+
+    converter = SOURCE_PIPELINES.get(source_type)
+    if converter:
+        mapped_lines = list(converter([event]))
+        if mapped_lines:
+            mapped_line = mapped_lines[0]
+            try:
+                mapped_event = json.loads(mapped_line)
+            except json.JSONDecodeError:
+                mapped_event = None
+            if isinstance(mapped_event, dict):
+                mapped_event = _ensure_unmapped_original(event, mapped_event)
+                return _apply_post_processing(mapped_event, ingestion_time=ingestion_time)
+
+    unknown_event = map_unknown_event_to_ocsf(
+        event,
+        reason=f"No mapper for source {source_type}.",
+    )
+    return _apply_post_processing(unknown_event, ingestion_time=ingestion_time)
+
+
 def convert_events_to_ocsf_jsonl(
     events: Iterable[dict],
     *,
     threshold: float = 0.6,
 ) -> Iterator[str]:
+    ingestion_time = _current_ingestion_time()
     for event in events:
+        if PARSE_ERROR_KEY in event:
+            mapped_event = _map_event_with_source(
+                event,
+                source_type="unknown",
+                ingestion_time=ingestion_time,
+            )
+            yield json.dumps(mapped_event, ensure_ascii=False)
+            continue
         detection = detect_event(event, threshold=threshold)
         source_type = detection["source_type"]
-        if source_type != "unknown":
-            converter = SOURCE_PIPELINES.get(source_type)
-            if converter:
-                mapped_lines = list(converter([event]))
-                if mapped_lines:
-                    mapped_line = mapped_lines[0]
-                    try:
-                        mapped_event = json.loads(mapped_line)
-                    except json.JSONDecodeError:
-                        mapped_event = None
-                    if isinstance(mapped_event, dict):
-                        mapped_event = _ensure_unmapped_original(event, mapped_event)
-                        yield json.dumps(mapped_event, ensure_ascii=False)
-                        continue
-                    yield mapped_line
-                    continue
-        unknown_event = map_unknown_event_to_ocsf(event)
-        yield json.dumps(unknown_event, ensure_ascii=False)
+        mapped_event = _map_event_with_source(
+            event,
+            source_type=source_type,
+            ingestion_time=ingestion_time,
+        )
+        yield json.dumps(mapped_event, ensure_ascii=False)
+
+
+def convert_events_with_source_to_ocsf_jsonl(
+    events: Iterable[dict],
+    *,
+    source_type: str,
+) -> Iterator[str]:
+    ingestion_time = _current_ingestion_time()
+    for event in events:
+        mapped_event = _map_event_with_source(
+            event,
+            source_type=source_type,
+            ingestion_time=ingestion_time,
+        )
+        yield json.dumps(mapped_event, ensure_ascii=False)

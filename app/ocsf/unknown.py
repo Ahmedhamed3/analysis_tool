@@ -33,7 +33,10 @@ def _extract_time_value(event: Dict[str, Any]) -> Optional[Any]:
     return None
 
 
-def map_unknown_event_to_ocsf(event: Dict[str, Any]) -> Dict[str, Any]:
+def map_unknown_event_to_ocsf(event: Dict[str, Any], *, reason: Optional[str] = None) -> Dict[str, Any]:
+    unmapped: Dict[str, Any] = {"original_event": event}
+    if reason:
+        unmapped["reason"] = reason
     return {
         "activity_id": 0,
         "category_uid": 0,
@@ -41,5 +44,25 @@ def map_unknown_event_to_ocsf(event: Dict[str, Any]) -> Dict[str, Any]:
         "type_uid": 0,
         "time": _to_iso8601_utc(_extract_time_value(event)),
         "metadata": {"product": "Unknown"},
-        "unmapped": {"original_event": event},
+        "unmapped": unmapped,
+    }
+
+
+def map_parse_error_to_ocsf(
+    *,
+    raw_line: str,
+    error_message: str,
+    ingestion_time: str,
+) -> Dict[str, Any]:
+    return {
+        "activity_id": 0,
+        "category_uid": 0,
+        "class_uid": 0,
+        "type_uid": 0,
+        "time": ingestion_time,
+        "metadata": {"product": "ParseError"},
+        "unmapped": {
+            "original_line": raw_line,
+            "parse_error": error_message,
+        },
     }
