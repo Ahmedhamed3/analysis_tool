@@ -5,7 +5,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from app.correlation.process_chain import build_process_chains
 from app.conversion import SOURCE_PIPELINES, convert_events_to_ocsf_jsonl
-from app.detect import auto_detect_source
+from app.detect import auto_detect_source, summarize_event_detection
 from app.formats.reader import iter_events_from_upload
 from app.plugins.azure_ad_signin.detect import score_events as score_azure_ad_signin
 from app.plugins.azure_ad_signin.pipeline import convert_azure_ad_signin_events_to_ocsf_jsonl
@@ -202,11 +202,12 @@ HTML_PAGE = """<!doctype html>
       </select>
       <button class="primary" id="previewBtn">Convert</button>
     </div>
-    <div class="detect-panel" id="detectPanel">
+      <div class="detect-panel" id="detectPanel">
       <h3>Detection</h3>
       <div class="detect-row" id="detectSource">Source: —</div>
       <div class="detect-row" id="detectConfidence">Confidence: —</div>
       <div class="detect-row" id="detectReason">Reason: —</div>
+      <div class="detect-row" id="detectBreakdown">Breakdown: —</div>
     </div>
     <div class="pane-grid">
       <div class="pane">
@@ -236,6 +237,7 @@ HTML_PAGE = """<!doctype html>
       const detectSource = document.getElementById("detectSource");
       const detectConfidence = document.getElementById("detectConfidence");
       const detectReason = document.getElementById("detectReason");
+      const detectBreakdown = document.getElementById("detectBreakdown");
       let cachedOcsfEvents = [];
 
       function parseNdjson(value) {
@@ -313,6 +315,7 @@ HTML_PAGE = """<!doctype html>
           detectSource.textContent = "Source: —";
           detectConfidence.textContent = "Confidence: —";
           detectReason.textContent = "Reason: —";
+          detectBreakdown.textContent = "Breakdown: —";
           return;
         }
         detectSource.textContent = `Source: ${detection.source_type || "unknown"}`;
@@ -323,6 +326,15 @@ HTML_PAGE = """<!doctype html>
         }
         const reasonText = detection.reason ? detection.reason : "—";
         detectReason.textContent = `Reason: ${reasonText}${errorMessage ? ` (${errorMessage})` : ""}`;
+        if (Array.isArray(detection.breakdown) && detection.breakdown.length) {
+          const breakdownLines = detection.breakdown.map((item) => {
+            const ratio = typeof item.ratio === "number" ? item.ratio.toFixed(2) : "0.00";
+            return `${item.source}: ${item.count}/${item.total} (${ratio})`;
+          });
+          detectBreakdown.textContent = `Breakdown: ${breakdownLines.join(", ")}`;
+        } else {
+          detectBreakdown.textContent = "Breakdown: —";
+        }
       }
 
       async function postPreview() {
@@ -725,8 +737,8 @@ async def convert_auto(file: UploadFile = File(...)):
 @app.post("/convert/auto/preview")
 async def convert_auto_preview(file: UploadFile = File(...)):
     upload = await _read_upload(file)
-    detection = auto_detect_source(
-        upload["events"][:DETECTION_SAMPLE_SIZE],
+    detection = summarize_event_detection(
+        upload["events"],
         threshold=DETECTION_THRESHOLD,
     )
     detection["auto"] = True
