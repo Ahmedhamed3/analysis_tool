@@ -45,7 +45,39 @@ class SysmonNormalized:
     granted_access: Optional[str] = None
     start_address: Optional[str] = None
     start_module: Optional[str] = None
+    hashes: Optional[Dict[str, str]] = None
     event_data: Optional[Dict[str, Any]] = None
+
+
+def parse_sysmon_hashes(value: Any) -> Dict[str, str]:
+    hashes: Dict[str, str] = {}
+    if isinstance(value, dict):
+        items = list(value.items())
+    elif isinstance(value, str):
+        items = []
+        for part in value.split(","):
+            if not part:
+                continue
+            if "=" not in part:
+                continue
+            key, hash_value = part.split("=", 1)
+            items.append((key, hash_value))
+    else:
+        return hashes
+
+    for key, hash_value in items:
+        if key is None:
+            continue
+        normalized_key = str(key).strip().lower()
+        if not normalized_key:
+            continue
+        if hash_value is None:
+            continue
+        normalized_value = str(hash_value).strip()
+        if not normalized_value:
+            continue
+        hashes[normalized_key] = normalized_value
+    return hashes
 
 def _to_iso8601_z(ts: str) -> str:
     """
@@ -164,6 +196,8 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
     granted_access = _value_from_event(ev, event_data, "GrantedAccess")
     start_address = _value_from_event(ev, event_data, "StartAddress")
     start_module = _value_from_event(ev, event_data, "StartModule")
+    hashes_value = _value_from_event(ev, event_data, "Hashes", "Hash")
+    hashes = parse_sysmon_hashes(hashes_value)
 
     return SysmonNormalized(
         ts=_to_iso8601_z(str(ts)),
@@ -206,6 +240,7 @@ def _extract_fields(ev: Dict[str, Any]) -> SysmonNormalized:
         granted_access=str(granted_access) if granted_access else None,
         start_address=str(start_address) if start_address else None,
         start_module=str(start_module) if start_module else None,
+        hashes=hashes or None,
         event_data=dict(ev) if isinstance(ev, dict) else None,
     )
 
