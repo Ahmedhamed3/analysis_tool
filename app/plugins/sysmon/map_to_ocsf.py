@@ -306,8 +306,8 @@ def map_sysmon_eventid7_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]
     type_uid = calc_type_uid(MODULE_ACTIVITY_CLASS_UID, MODULE_ACTIVITY_LOAD_ID)
 
     actor, device = _build_actor_and_device(ev)
-    if "process" not in actor:
-        return None
+    if not actor:
+        actor = {"app_name": "unknown"}
 
     image_loaded = _event_data_value(ev.event_data, "ImageLoaded") or ev.image_loaded
 
@@ -357,8 +357,8 @@ def map_sysmon_eventid8_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]
     type_uid = calc_type_uid(PROCESS_ACTIVITY_CLASS_UID, PROCESS_ACTIVITY_INJECT_ID)
 
     actor, device = _build_actor_and_device(ev)
-    if "process" not in actor:
-        return None
+    if not actor:
+        actor = {"app_name": "unknown"}
 
     target_process = _build_target_process(ev)
 
@@ -405,8 +405,8 @@ def map_sysmon_eventid10_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any
     type_uid = calc_type_uid(PROCESS_ACTIVITY_CLASS_UID, PROCESS_ACTIVITY_OPEN_ID)
 
     actor, device = _build_actor_and_device(ev)
-    if "process" not in actor:
-        return None
+    if not actor:
+        actor = {"app_name": "unknown"}
 
     target_process = _build_target_process(ev)
 
@@ -460,8 +460,8 @@ def map_sysmon_eventid12_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any
     type_uid = calc_type_uid(REGISTRY_KEY_ACTIVITY_CLASS_UID, activity_id)
 
     actor, device = _build_actor_and_device(ev)
-    if "process" not in actor:
-        return None
+    if not actor:
+        actor = {"app_name": "unknown"}
 
     reg_key_path = _event_data_value(ev.event_data, "TargetObject") or ev.target_object
     reg_key: Dict[str, Any] = {}
@@ -506,8 +506,8 @@ def map_sysmon_eventid13_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any
     type_uid = calc_type_uid(REGISTRY_VALUE_ACTIVITY_CLASS_UID, REGISTRY_VALUE_ACTIVITY_SET_ID)
 
     actor, device = _build_actor_and_device(ev)
-    if "process" not in actor:
-        return None
+    if not actor:
+        actor = {"app_name": "unknown"}
 
     target_object = _event_data_value(ev.event_data, "TargetObject") or ev.target_object
     reg_path, reg_name = _split_registry_target(target_object)
@@ -567,8 +567,8 @@ def map_sysmon_eventid14_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any
     type_uid = calc_type_uid(class_uid, activity_id)
 
     actor, device = _build_actor_and_device(ev)
-    if "process" not in actor:
-        return None
+    if not actor:
+        actor = {"app_name": "unknown"}
 
     target_object = _event_data_value(ev.event_data, "TargetObject") or ev.target_object
     new_name = _event_data_value(ev.event_data, "NewName") or ev.new_name
