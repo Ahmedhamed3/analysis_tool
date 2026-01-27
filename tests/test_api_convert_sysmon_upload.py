@@ -97,3 +97,34 @@ def test_convert_sysmon_preview_returns_original_and_unified():
     assert "\"class_uid\"" in body["unified_ndjson"]
     assert "\"activity_id\"" in body["unified_ndjson"]
     assert "\"type_uid\"" in body["unified_ndjson"]
+
+
+def test_convert_sysmon_upload_ndjson_eventid15_hashes():
+    client = TestClient(app)
+
+    ndjson_line = (
+        "{\"EventID\":15,\"UtcTime\":\"2025-01-26 20:31:22.123\","
+        "\"Image\":\"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\","
+        "\"ProcessGuid\":\"{8f1c2d3e-1111-2222-3333-444455556666}\","
+        "\"ProcessId\":4120,"
+        "\"TargetFilename\":\"C:\\\\Users\\\\User\\\\AppData\\\\Local\\\\Temp\\\\dropper.bin\","
+        "\"CreationUtcTime\":\"2025-01-26 20:31:21.900\","
+        "\"Hashes\":\"MD5=9f86d081884c7d659a2feaa0c55ad015,"
+        "SHA256=2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae,"
+        "IMPHASH=00000000000000000000000000000000\","
+        "\"User\":\"DESKTOP-1\\\\User\"}"
+    )
+
+    files = {
+        "file": ("eventid15.ndjson", ndjson_line.encode("utf-8"), "application/x-ndjson")
+    }
+
+    response = client.post("/convert/sysmon", files=files)
+
+    assert response.status_code == 200
+    lines = [line for line in response.text.splitlines() if line.strip()]
+    assert len(lines) == 1
+
+    event = json.loads(lines[0])
+    assert event["file"]["hash"]["sha256"].startswith("2c26b46b")
+    assert event["unmapped"]["original_event"]["EventID"] == 15

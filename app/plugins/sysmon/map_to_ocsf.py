@@ -690,6 +690,73 @@ def map_sysmon_eventid11_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any
     return ocsf_event
 
 
+def map_sysmon_eventid15_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]]:
+    """
+    Maps ONLY Sysmon EventID 15 (FileCreateStreamHash) -> OCSF File System Activity Create.
+    Returns None if event is not EventID 15.
+    """
+    if ev.event_id != 15:
+        return None
+
+    type_uid = calc_type_uid(FILE_SYSTEM_ACTIVITY_CLASS_UID, FILE_SYSTEM_ACTIVITY_CREATE_ID)
+
+    target_filename = _event_data_value(ev.event_data, "TargetFilename") or ev.target_filename
+    image = _event_data_value(ev.event_data, "Image") or ev.image
+    process_id = _event_data_value(ev.event_data, "ProcessId") or ev.pid
+    hashes = ev.hashes or {}
+
+    actor: Dict[str, Any] = {}
+    process: Dict[str, Any] = {}
+    if image:
+        process["executable"] = image
+    pid = _safe_int(process_id)
+    if pid is not None:
+        process["pid"] = pid
+    if process:
+        actor["process"] = process
+    if ev.user:
+        actor["user"] = {"name": ev.user}
+
+    file_obj: Dict[str, Any] = {}
+    if target_filename:
+        file_obj["path"] = target_filename
+        file_obj["name"] = _basename(target_filename) or target_filename
+        file_obj["type_id"] = DEFAULT_FILE_TYPE_ID
+    if hashes:
+        file_obj["hash"] = dict(hashes)
+
+    unmapped: Dict[str, Any] = {}
+    if ev.process_guid:
+        unmapped["process_guid"] = ev.process_guid
+    if ev.user:
+        unmapped["user"] = ev.user
+    if ev.creation_utctime:
+        unmapped["creation_utctime"] = ev.creation_utctime
+    if ev.event_data:
+        unmapped["original_event"] = ev.event_data
+
+    ocsf_event: Dict[str, Any] = {
+        "activity_id": FILE_SYSTEM_ACTIVITY_CREATE_ID,
+        "category_uid": CATEGORY_UID_SYSTEM,
+        "class_uid": FILE_SYSTEM_ACTIVITY_CLASS_UID,
+        "type_uid": type_uid,
+        "time": ev.ts,
+        "severity_id": DEFAULT_SEVERITY_ID,
+        "metadata": {
+            "product": DEFAULT_METADATA_PRODUCT,
+            "version": DEFAULT_METADATA_VERSION,
+        },
+        "actor": actor if actor else {"app_name": "unknown"},
+    }
+
+    if file_obj:
+        ocsf_event["file"] = file_obj
+    if unmapped:
+        ocsf_event["unmapped"] = unmapped
+
+    return ocsf_event
+
+
 def map_sysmon_eventid22_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]]:
     """
     Maps ONLY Sysmon EventID 22 (DNS Query) -> OCSF DNS Activity Query.

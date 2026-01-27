@@ -13,6 +13,7 @@ from app.plugins.sysmon.map_to_ocsf import (
     map_sysmon_eventid13_to_ocsf,
     map_sysmon_eventid14_to_ocsf,
     map_sysmon_eventid11_to_ocsf,
+    map_sysmon_eventid15_to_ocsf,
     map_sysmon_eventid22_to_ocsf,
 )
 
@@ -24,6 +25,7 @@ EVENT_MAPPERS = {
     8: map_sysmon_eventid8_to_ocsf,
     10: map_sysmon_eventid10_to_ocsf,
     11: map_sysmon_eventid11_to_ocsf,
+    15: map_sysmon_eventid15_to_ocsf,
     12: map_sysmon_eventid12_to_ocsf,
     13: map_sysmon_eventid13_to_ocsf,
     14: map_sysmon_eventid14_to_ocsf,
