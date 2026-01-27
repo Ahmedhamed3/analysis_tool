@@ -5,6 +5,8 @@ from app.plugins.suricata.detect import score_events as score_suricata
 from app.plugins.sysmon.detect import score_events as score_sysmon
 from app.plugins.windows_security.detect import score_events as score_windows_security
 from app.plugins.zeek.detect import score_events as score_zeek
+from app.plugins.zeek_http.detect import score_events as score_zeek_http
+from app.plugins.proxy_http.detect import score_events as score_proxy_http
 
 
 SCORE_FUNCS = {
@@ -12,6 +14,8 @@ SCORE_FUNCS = {
     "sysmon": score_sysmon,
     "suricata": score_suricata,
     "zeek": score_zeek,
+    "zeek_http": score_zeek_http,
+    "proxy_http": score_proxy_http,
     "file-artifact": score_file_artifact,
 }
 

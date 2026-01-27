@@ -1,6 +1,7 @@
 # OCSF v1.2.0 (based on your schema files)
 
 CATEGORY_UID_SYSTEM = 1
+CATEGORY_UID_NETWORK = 4
 
 # From events/system/process.json snippet you pasted:
 PROCESS_ACTIVITY_CLASS_UID = 7
@@ -21,6 +22,10 @@ FILE_SYSTEM_ACTIVITY_OTHER_ID = 99
 
 MODULE_ACTIVITY_CLASS_UID = 5
 MODULE_ACTIVITY_LOAD_ID = 1
+
+# HTTP Activity (Network)
+HTTP_ACTIVITY_CLASS_UID = 4002
+HTTP_ACTIVITY_REQUEST_ID = 1
 
 # In your schema, Codex computed:
 # type_uid = class_uid * 100 + activity_id  (for this class)
