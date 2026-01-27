@@ -6,6 +6,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from app.correlation.process_chain import build_process_chains
 from app.detect import auto_detect_source
 from app.formats.reader import iter_events_from_upload
+from app.plugins.azure_ad_signin.detect import score_events as score_azure_ad_signin
+from app.plugins.azure_ad_signin.pipeline import convert_azure_ad_signin_events_to_ocsf_jsonl
 from app.plugins.file_artifact.detect import score_events as score_file_artifact
 from app.plugins.file_artifact.pipeline import convert_file_artifact_events_to_ocsf_jsonl
 from app.plugins.suricata.detect import score_events as score_suricata
@@ -33,6 +35,7 @@ DETECTION_SAMPLE_SIZE = 10
 DETECTION_THRESHOLD = 0.6
 
 SOURCE_PIPELINES = {
+    "azure_ad_signin": convert_azure_ad_signin_events_to_ocsf_jsonl,
     "sysmon": convert_sysmon_events_to_ocsf_jsonl,
     "zeek": convert_zeek_dns_events_to_ocsf_jsonl,
     "zeek_http": convert_zeek_http_events_to_ocsf_jsonl,
@@ -43,6 +46,7 @@ SOURCE_PIPELINES = {
 }
 
 SOURCE_SCORERS = {
+    "azure_ad_signin": score_azure_ad_signin,
     "sysmon": score_sysmon,
     "zeek": score_zeek,
     "zeek_http": score_zeek_http,
@@ -198,6 +202,7 @@ HTML_PAGE = """<!doctype html>
       <select id="sourceSelect">
         <option value="auto">Auto Detect</option>
         <option value="sysmon">Sysmon</option>
+        <option value="azure_ad_signin">Azure AD Sign-In</option>
         <option value="zeek">Zeek DNS</option>
         <option value="zeek_http">Zeek HTTP</option>
         <option value="suricata">Suricata Alerts</option>

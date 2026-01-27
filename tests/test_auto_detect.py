@@ -36,6 +36,8 @@ def _load_events(sample_path: Path) -> list[dict]:
 
 
 SAMPLES = [
+    ("azure_ad_signin", "azure_ad_signin_success.ndjson"),
+    ("azure_ad_signin", "azure_ad_signin.single.json"),
     ("sysmon", "sysmon.ndjson"),
     ("sysmon", "sysmon.json"),
     ("suricata", "suricata.ndjson"),
