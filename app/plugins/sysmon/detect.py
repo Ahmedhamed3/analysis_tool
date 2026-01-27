@@ -86,12 +86,20 @@ def score_events(events: List[dict]) -> Tuple[float, str]:
     total = 0
     matched = 0
     with_metadata = 0
+    target_event_ids = {7, 8, 10, 12, 13, 14}
+    target_matches = 0
     for ev in events:
         if not isinstance(ev, dict):
             continue
         total += 1
         if any(key in ev for key in ("EventID", "EventId", "event_id")):
             matched += 1
+            event_id = ev.get("EventID") or ev.get("EventId") or ev.get("event_id")
+            try:
+                if int(event_id) in target_event_ids:
+                    target_matches += 1
+            except (TypeError, ValueError):
+                pass
             if isinstance(ev.get("EventData"), dict) or any(
                 key in ev for key in ("UtcTime", "TimeCreated", "Timestamp")
             ):
@@ -103,8 +111,12 @@ def score_events(events: List[dict]) -> Tuple[float, str]:
     score = matched / total
     if matched and with_metadata:
         score = min(1.0, score + 0.2)
+    if target_matches:
+        score = min(1.0, score + 0.1)
 
     reason = f"Matched {matched}/{total} events with Sysmon-style EventID keys."
     if with_metadata:
         reason += " EventData/UtcTime fields present."
+    if target_matches:
+        reason += f" Includes {target_matches} target EventID(s) (7/8/10/12/13/14)."
     return score, reason
