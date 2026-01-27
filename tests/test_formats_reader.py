@@ -1,8 +1,6 @@
 import json
 
-import pytest
-
-from app.formats.reader import iter_events_from_upload
+from app.formats.reader import PARSE_ERROR_KEY, iter_events_from_upload
 
 
 def test_iter_events_from_upload_handles_json_variants():
@@ -19,5 +17,6 @@ def test_iter_events_from_upload_handles_json_variants():
 
 def test_iter_events_from_upload_rejects_malformed_json():
     payload = b"{not: valid json"
-    with pytest.raises(Exception):
-        list(iter_events_from_upload(payload))
+    events = list(iter_events_from_upload(payload))
+    assert len(events) == 1
+    assert PARSE_ERROR_KEY in events[0]

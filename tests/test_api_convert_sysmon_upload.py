@@ -55,7 +55,7 @@ def test_convert_sysmon_upload_json_array_mixed_events():
     assert response.headers["content-type"].startswith("application/x-ndjson")
 
     lines = [line for line in response.text.splitlines() if line.strip()]
-    assert len(lines) == 3
+    assert len(lines) == 4
 
     events = [json.loads(line) for line in lines]
     type_pairs = {(event["class_uid"], event["type_uid"]) for event in events}
@@ -63,6 +63,7 @@ def test_convert_sysmon_upload_json_array_mixed_events():
     assert (7, 701) in type_pairs
     assert (4001, 400101) in type_pairs
     assert (1001, 100101) in type_pairs
+    assert any(event.get("metadata", {}).get("product") == "Unknown" for event in events)
 
 
 def test_convert_sysmon_preview_returns_original_and_unified():

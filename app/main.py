@@ -4,25 +4,21 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from app.correlation.process_chain import build_process_chains
-from app.conversion import SOURCE_PIPELINES, convert_events_to_ocsf_jsonl
+from app.conversion import (
+    SOURCE_PIPELINES,
+    convert_events_to_ocsf_jsonl,
+    convert_events_with_source_to_ocsf_jsonl,
+)
 from app.detect import auto_detect_source, summarize_event_detection
 from app.formats.reader import iter_events_from_upload
 from app.plugins.azure_ad_signin.detect import score_events as score_azure_ad_signin
-from app.plugins.azure_ad_signin.pipeline import convert_azure_ad_signin_events_to_ocsf_jsonl
 from app.plugins.file_artifact.detect import score_events as score_file_artifact
-from app.plugins.file_artifact.pipeline import convert_file_artifact_events_to_ocsf_jsonl
 from app.plugins.suricata.detect import score_events as score_suricata
-from app.plugins.suricata.pipeline import convert_suricata_events_to_ocsf_jsonl
 from app.plugins.sysmon.detect import score_events as score_sysmon
-from app.plugins.sysmon.pipeline import convert_sysmon_events_to_ocsf_jsonl
 from app.plugins.windows_security.detect import score_events as score_windows_security
-from app.plugins.windows_security.pipeline import convert_windows_security_events_to_ocsf_jsonl
 from app.plugins.zeek.detect import score_events as score_zeek
-from app.plugins.zeek.pipeline import convert_zeek_dns_events_to_ocsf_jsonl
 from app.plugins.zeek_http.detect import score_events as score_zeek_http
-from app.plugins.zeek_http.pipeline import convert_zeek_http_events_to_ocsf_jsonl
 from app.plugins.proxy_http.detect import score_events as score_proxy_http
-from app.plugins.proxy_http.pipeline import convert_proxy_http_events_to_ocsf_jsonl
 
 app = FastAPI(
     title="Log → OCSF Converter (MVP)",
@@ -514,9 +510,14 @@ async def correlate_process_chains(events: List[Dict[str, Any]]):
     return JSONResponse([_format_chain(chain) for chain in chains])
 
 def _stream_ndjson(events: List[dict], source_type: str, filename: str) -> StreamingResponse:
-    converter = _get_converter(source_type)
     return StreamingResponse(
-        (line + "\n" for line in converter(events)),
+        (
+            line + "\n"
+            for line in convert_events_with_source_to_ocsf_jsonl(
+                events,
+                source_type=source_type,
+            )
+        ),
         media_type="application/x-ndjson",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
@@ -558,7 +559,12 @@ async def convert_sysmon(file: UploadFile = File(...)):
 async def convert_sysmon_preview(file: UploadFile = File(...)):
     upload = await _read_upload(file)
     _validate_selected_source("sysmon", upload["events"])
-    unified_lines = list(convert_sysmon_events_to_ocsf_jsonl(upload["events"]))
+    unified_lines = list(
+        convert_events_with_source_to_ocsf_jsonl(
+            upload["events"],
+            source_type="sysmon",
+        )
+    )
     detection = _build_detection_payload(
         "sysmon",
         auto=False,
@@ -582,7 +588,12 @@ async def convert_zeek(file: UploadFile = File(...)):
 async def convert_zeek_preview(file: UploadFile = File(...)):
     upload = await _read_upload(file)
     _validate_selected_source("zeek", upload["events"])
-    unified_lines = list(convert_zeek_dns_events_to_ocsf_jsonl(upload["events"]))
+    unified_lines = list(
+        convert_events_with_source_to_ocsf_jsonl(
+            upload["events"],
+            source_type="zeek",
+        )
+    )
     detection = _build_detection_payload(
         "zeek",
         auto=False,
@@ -606,7 +617,12 @@ async def convert_zeek_http(file: UploadFile = File(...)):
 async def convert_zeek_http_preview(file: UploadFile = File(...)):
     upload = await _read_upload(file)
     _validate_selected_source("zeek_http", upload["events"])
-    unified_lines = list(convert_zeek_http_events_to_ocsf_jsonl(upload["events"]))
+    unified_lines = list(
+        convert_events_with_source_to_ocsf_jsonl(
+            upload["events"],
+            source_type="zeek_http",
+        )
+    )
     detection = _build_detection_payload(
         "zeek_http",
         auto=False,
@@ -630,7 +646,12 @@ async def convert_suricata(file: UploadFile = File(...)):
 async def convert_suricata_preview(file: UploadFile = File(...)):
     upload = await _read_upload(file)
     _validate_selected_source("suricata", upload["events"])
-    unified_lines = list(convert_suricata_events_to_ocsf_jsonl(upload["events"]))
+    unified_lines = list(
+        convert_events_with_source_to_ocsf_jsonl(
+            upload["events"],
+            source_type="suricata",
+        )
+    )
     detection = _build_detection_payload(
         "suricata",
         auto=False,
@@ -658,7 +679,12 @@ async def convert_windows_security(file: UploadFile = File(...)):
 async def convert_windows_security_preview(file: UploadFile = File(...)):
     upload = await _read_upload(file)
     _validate_selected_source("windows-security", upload["events"])
-    unified_lines = list(convert_windows_security_events_to_ocsf_jsonl(upload["events"]))
+    unified_lines = list(
+        convert_events_with_source_to_ocsf_jsonl(
+            upload["events"],
+            source_type="windows-security",
+        )
+    )
     detection = _build_detection_payload(
         "windows-security",
         auto=False,
@@ -686,7 +712,12 @@ async def convert_file_artifact(file: UploadFile = File(...)):
 async def convert_file_artifact_preview(file: UploadFile = File(...)):
     upload = await _read_upload(file)
     _validate_selected_source("file-artifact", upload["events"])
-    unified_lines = list(convert_file_artifact_events_to_ocsf_jsonl(upload["events"]))
+    unified_lines = list(
+        convert_events_with_source_to_ocsf_jsonl(
+            upload["events"],
+            source_type="file-artifact",
+        )
+    )
     detection = _build_detection_payload(
         "file-artifact",
         auto=False,
@@ -710,7 +741,12 @@ async def convert_proxy_http(file: UploadFile = File(...)):
 async def convert_proxy_http_preview(file: UploadFile = File(...)):
     upload = await _read_upload(file)
     _validate_selected_source("proxy_http", upload["events"])
-    unified_lines = list(convert_proxy_http_events_to_ocsf_jsonl(upload["events"]))
+    unified_lines = list(
+        convert_events_with_source_to_ocsf_jsonl(
+            upload["events"],
+            source_type="proxy_http",
+        )
+    )
     detection = _build_detection_payload(
         "proxy_http",
         auto=False,
