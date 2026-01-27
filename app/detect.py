@@ -1,6 +1,7 @@
 from typing import Dict, List
 
 from app.plugins.file_artifact.detect import score_events as score_file_artifact
+from app.plugins.azure_ad_signin.detect import score_events as score_azure_ad_signin
 from app.plugins.suricata.detect import score_events as score_suricata
 from app.plugins.sysmon.detect import score_events as score_sysmon
 from app.plugins.windows_security.detect import score_events as score_windows_security
@@ -10,6 +11,7 @@ from app.plugins.proxy_http.detect import score_events as score_proxy_http
 
 
 SCORE_FUNCS = {
+    "azure_ad_signin": score_azure_ad_signin,
     "windows-security": score_windows_security,
     "sysmon": score_sysmon,
     "suricata": score_suricata,
