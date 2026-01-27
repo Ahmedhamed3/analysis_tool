@@ -4,6 +4,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from app.correlation.process_chain import build_process_chains
+from app.conversion import SOURCE_PIPELINES, convert_events_to_ocsf_jsonl
 from app.detect import auto_detect_source
 from app.formats.reader import iter_events_from_upload
 from app.plugins.azure_ad_signin.detect import score_events as score_azure_ad_signin
@@ -33,17 +34,6 @@ app = FastAPI(
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 DETECTION_SAMPLE_SIZE = 10
 DETECTION_THRESHOLD = 0.6
-
-SOURCE_PIPELINES = {
-    "azure_ad_signin": convert_azure_ad_signin_events_to_ocsf_jsonl,
-    "sysmon": convert_sysmon_events_to_ocsf_jsonl,
-    "zeek": convert_zeek_dns_events_to_ocsf_jsonl,
-    "zeek_http": convert_zeek_http_events_to_ocsf_jsonl,
-    "suricata": convert_suricata_events_to_ocsf_jsonl,
-    "windows-security": convert_windows_security_events_to_ocsf_jsonl,
-    "file-artifact": convert_file_artifact_events_to_ocsf_jsonl,
-    "proxy_http": convert_proxy_http_events_to_ocsf_jsonl,
-}
 
 SOURCE_SCORERS = {
     "azure_ad_signin": score_azure_ad_signin,
@@ -520,6 +510,14 @@ def _stream_ndjson(events: List[dict], source_type: str, filename: str) -> Strea
     )
 
 
+def _stream_auto_ndjson(events: List[dict], filename: str) -> StreamingResponse:
+    return StreamingResponse(
+        (line + "\n" for line in convert_events_to_ocsf_jsonl(events, threshold=DETECTION_THRESHOLD)),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 def _build_preview_response(
     *,
     original_text: str,
@@ -721,19 +719,7 @@ async def convert_auto(file: UploadFile = File(...)):
         threshold=DETECTION_THRESHOLD,
     )
     detection["auto"] = True
-    if detection["source_type"] == "unknown":
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "Unable to confidently auto-detect source.",
-                "detection": detection,
-            },
-        )
-    return _stream_ndjson(
-        upload["events"],
-        detection["source_type"],
-        "output.auto.ocsf.jsonl",
-    )
+    return _stream_auto_ndjson(upload["events"], "output.auto.ocsf.jsonl")
 
 
 @app.post("/convert/auto/preview")
@@ -744,17 +730,15 @@ async def convert_auto_preview(file: UploadFile = File(...)):
         threshold=DETECTION_THRESHOLD,
     )
     detection["auto"] = True
+    unified_lines = list(
+        convert_events_to_ocsf_jsonl(upload["events"], threshold=DETECTION_THRESHOLD)
+    )
+    error = None
     if detection["source_type"] == "unknown":
-        return _build_preview_response(
-            original_text=upload["original_text"],
-            unified_lines=[],
-            detection=detection,
-            error="Unable to confidently auto-detect source.",
-        )
-    converter = _get_converter(detection["source_type"])
-    unified_lines = list(converter(upload["events"]))
+        error = "Unable to confidently auto-detect source."
     return _build_preview_response(
         original_text=upload["original_text"],
         unified_lines=unified_lines,
         detection=detection,
+        error=error,
     )
