@@ -55,3 +55,38 @@ def auto_detect_source(
         "confidence": best_confidence,
         "reason": best_reason,
     }
+
+
+def detect_event(
+    event: dict,
+    *,
+    threshold: float = 0.6,
+) -> Dict[str, object]:
+    if not event:
+        return {
+            "source_type": "unknown",
+            "confidence": 0.0,
+            "reason": "No event provided for detection.",
+        }
+
+    scored = []
+    for source_type, scorer in SCORE_FUNCS.items():
+        confidence, reason = scorer([event])
+        scored.append((source_type, confidence, reason))
+
+    best_source, best_confidence, best_reason = max(scored, key=lambda item: item[1])
+
+    if best_confidence < threshold:
+        return {
+            "source_type": "unknown",
+            "confidence": best_confidence,
+            "reason": (
+                f"Low confidence. Best guess: {best_source}. {best_reason}"
+            ),
+        }
+
+    return {
+        "source_type": best_source,
+        "confidence": best_confidence,
+        "reason": best_reason,
+    }
