@@ -16,6 +16,10 @@ from app.plugins.windows_security.detect import score_events as score_windows_se
 from app.plugins.windows_security.pipeline import convert_windows_security_events_to_ocsf_jsonl
 from app.plugins.zeek.detect import score_events as score_zeek
 from app.plugins.zeek.pipeline import convert_zeek_dns_events_to_ocsf_jsonl
+from app.plugins.zeek_http.detect import score_events as score_zeek_http
+from app.plugins.zeek_http.pipeline import convert_zeek_http_events_to_ocsf_jsonl
+from app.plugins.proxy_http.detect import score_events as score_proxy_http
+from app.plugins.proxy_http.pipeline import convert_proxy_http_events_to_ocsf_jsonl
 
 app = FastAPI(
     title="Log → OCSF Converter (MVP)",
@@ -31,17 +35,21 @@ DETECTION_THRESHOLD = 0.6
 SOURCE_PIPELINES = {
     "sysmon": convert_sysmon_events_to_ocsf_jsonl,
     "zeek": convert_zeek_dns_events_to_ocsf_jsonl,
+    "zeek_http": convert_zeek_http_events_to_ocsf_jsonl,
     "suricata": convert_suricata_events_to_ocsf_jsonl,
     "windows-security": convert_windows_security_events_to_ocsf_jsonl,
     "file-artifact": convert_file_artifact_events_to_ocsf_jsonl,
+    "proxy_http": convert_proxy_http_events_to_ocsf_jsonl,
 }
 
 SOURCE_SCORERS = {
     "sysmon": score_sysmon,
     "zeek": score_zeek,
+    "zeek_http": score_zeek_http,
     "suricata": score_suricata,
     "windows-security": score_windows_security,
     "file-artifact": score_file_artifact,
+    "proxy_http": score_proxy_http,
 }
 
 HTML_PAGE = """<!doctype html>
@@ -191,9 +199,11 @@ HTML_PAGE = """<!doctype html>
         <option value="auto">Auto Detect</option>
         <option value="sysmon">Sysmon</option>
         <option value="zeek">Zeek DNS</option>
+        <option value="zeek_http">Zeek HTTP</option>
         <option value="suricata">Suricata Alerts</option>
         <option value="windows-security">Windows Security</option>
         <option value="file-artifact">File Artifact</option>
+        <option value="proxy_http">Proxy HTTP</option>
       </select>
       <button class="primary" id="previewBtn">Convert</button>
     </div>
@@ -332,12 +342,16 @@ HTML_PAGE = """<!doctype html>
           endpoint = "/convert/auto/preview";
         } else if (sourceSelect.value === "zeek") {
           endpoint = "/convert/zeek/preview";
+        } else if (sourceSelect.value === "zeek_http") {
+          endpoint = "/convert/zeek_http/preview";
         } else if (sourceSelect.value === "suricata") {
           endpoint = "/convert/suricata/preview";
         } else if (sourceSelect.value === "windows-security") {
           endpoint = "/convert/windows-security/preview";
         } else if (sourceSelect.value === "file-artifact") {
           endpoint = "/convert/file-artifact/preview";
+        } else if (sourceSelect.value === "proxy_http") {
+          endpoint = "/convert/proxy_http/preview";
         }
         const response = await fetch(endpoint, {
           method: "POST",
@@ -566,6 +580,30 @@ async def convert_zeek_preview(file: UploadFile = File(...)):
     )
 
 
+@app.post("/convert/zeek_http")
+async def convert_zeek_http(file: UploadFile = File(...)):
+    upload = await _read_upload(file)
+    _validate_selected_source("zeek_http", upload["events"])
+    return _stream_ndjson(upload["events"], "zeek_http", "output.zeek_http.ocsf.jsonl")
+
+
+@app.post("/convert/zeek_http/preview")
+async def convert_zeek_http_preview(file: UploadFile = File(...)):
+    upload = await _read_upload(file)
+    _validate_selected_source("zeek_http", upload["events"])
+    unified_lines = list(convert_zeek_http_events_to_ocsf_jsonl(upload["events"]))
+    detection = _build_detection_payload(
+        "zeek_http",
+        auto=False,
+        reason="Selected manually.",
+    )
+    return _build_preview_response(
+        original_text=upload["original_text"],
+        unified_lines=unified_lines,
+        detection=detection,
+    )
+
+
 @app.post("/convert/suricata")
 async def convert_suricata(file: UploadFile = File(...)):
     upload = await _read_upload(file)
@@ -636,6 +674,30 @@ async def convert_file_artifact_preview(file: UploadFile = File(...)):
     unified_lines = list(convert_file_artifact_events_to_ocsf_jsonl(upload["events"]))
     detection = _build_detection_payload(
         "file-artifact",
+        auto=False,
+        reason="Selected manually.",
+    )
+    return _build_preview_response(
+        original_text=upload["original_text"],
+        unified_lines=unified_lines,
+        detection=detection,
+    )
+
+
+@app.post("/convert/proxy_http")
+async def convert_proxy_http(file: UploadFile = File(...)):
+    upload = await _read_upload(file)
+    _validate_selected_source("proxy_http", upload["events"])
+    return _stream_ndjson(upload["events"], "proxy_http", "output.proxy_http.ocsf.jsonl")
+
+
+@app.post("/convert/proxy_http/preview")
+async def convert_proxy_http_preview(file: UploadFile = File(...)):
+    upload = await _read_upload(file)
+    _validate_selected_source("proxy_http", upload["events"])
+    unified_lines = list(convert_proxy_http_events_to_ocsf_jsonl(upload["events"]))
+    detection = _build_detection_payload(
+        "proxy_http",
         auto=False,
         reason="Selected manually.",
     )
