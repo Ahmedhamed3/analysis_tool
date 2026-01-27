@@ -11,7 +11,14 @@ from app.ocsf.constants import (
     FILE_SYSTEM_ACTIVITY_DELETE_ID,
     FILE_SYSTEM_ACTIVITY_MODIFY_ID,
     FILE_SYSTEM_ACTIVITY_READ_ID,
+    MODULE_ACTIVITY_CLASS_UID,
+    MODULE_ACTIVITY_LOAD_ID,
     PROCESS_ACTIVITY_CLASS_UID,
+    PROCESS_ACTIVITY_INJECT_ID,
+    PROCESS_ACTIVITY_LAUNCH_ID,
+    PROCESS_ACTIVITY_OPEN_ID,
+    REGISTRY_KEY_ACTIVITY_CLASS_UID,
+    REGISTRY_VALUE_ACTIVITY_CLASS_UID,
     SECURITY_FINDING_CLASS_UID,
 )
 from app.ocsf.unknown import map_parse_error_to_ocsf, map_unknown_event_to_ocsf
@@ -93,6 +100,7 @@ def _extract_original_event_id(original_event: object) -> Optional[int]:
 
 
 def _derive_evidence_flags(event: dict) -> dict:
+    """Derive evidence flags based on normalized OCSF content and source hints."""
     metadata = event.get("metadata") or {}
     product = metadata.get("product")
     class_uid = event.get("class_uid")
@@ -110,10 +118,14 @@ def _derive_evidence_flags(event: dict) -> dict:
     original_event = unmapped.get("original_event")
     original_event_id = _extract_original_event_id(original_event)
 
-    process_execution = (
-        class_uid == PROCESS_ACTIVITY_CLASS_UID
-        or bool(actor_process.get("command_line") or actor_process.get("executable"))
-    )
+    # Process execution is only asserted for explicit process launch activity.
+    if original_event_id is not None:
+        process_execution = original_event_id == 1
+    else:
+        process_execution = (
+            class_uid == PROCESS_ACTIVITY_CLASS_UID
+            and activity_id == PROCESS_ACTIVITY_LAUNCH_ID
+        )
 
     file_create = (
         class_uid == FILE_SYSTEM_ACTIVITY_CLASS_UID
@@ -142,6 +154,21 @@ def _derive_evidence_flags(event: dict) -> dict:
 
     alert_present = class_uid == SECURITY_FINDING_CLASS_UID
 
+    module_load = (
+        class_uid == MODULE_ACTIVITY_CLASS_UID
+        and activity_id == MODULE_ACTIVITY_LOAD_ID
+    )
+    process_injection = (
+        class_uid == PROCESS_ACTIVITY_CLASS_UID
+        and activity_id == PROCESS_ACTIVITY_INJECT_ID
+    )
+    process_access = (
+        class_uid == PROCESS_ACTIVITY_CLASS_UID
+        and activity_id == PROCESS_ACTIVITY_OPEN_ID
+    )
+    registry_key = class_uid == REGISTRY_KEY_ACTIVITY_CLASS_UID
+    registry_value = class_uid == REGISTRY_VALUE_ACTIVITY_CLASS_UID
+
     unknown_present = product == "Unknown"
     parse_error_present = product == "ParseError"
 
@@ -154,16 +181,25 @@ def _derive_evidence_flags(event: dict) -> dict:
         "http": http_present,
         "identity": identity_present,
         "alert": alert_present,
+        "module_load": module_load,
+        "process_injection": process_injection,
+        "process_access": process_access,
+        "registry_key": registry_key,
+        "registry_value": registry_value,
         "unknown": unknown_present,
         "parse_error": parse_error_present,
     }
 
 
 def _derive_context_flags(event: dict) -> dict:
+    """Derive context flags from normalized OCSF fields."""
     actor = event.get("actor") or {}
     actor_user = actor.get("user") or {}
     actor_process = actor.get("process") or {}
+    process = event.get("process") or {}
     file_obj = event.get("file") or {}
+    module = event.get("module") or {}
+    module_file = module.get("file") or {}
     device = event.get("device") or {}
 
     network = event.get("network") or {}
@@ -172,18 +208,31 @@ def _derive_context_flags(event: dict) -> dict:
     src_endpoint = event.get("src_endpoint") or {}
     dst_endpoint = event.get("dst_endpoint") or {}
 
-    has_user = bool(actor_user.get("name") or actor_user.get("uid"))
-    has_process = bool(
-        actor_process.get("pid")
-        or actor_process.get("executable")
-        or actor_process.get("uid")
+    def _has_file_reference(file_candidate: object) -> bool:
+        if not isinstance(file_candidate, dict):
+            return False
+        return bool(file_candidate.get("path") or file_candidate.get("name"))
+
+    def _endpoint_has_ip(endpoint: object) -> bool:
+        return isinstance(endpoint, dict) and bool(endpoint.get("ip"))
+
+    has_user = bool(actor_user)
+    has_process = bool(actor_process) or bool(process)
+    has_file = any(
+        [
+            _has_file_reference(file_obj),
+            _has_file_reference(actor_process.get("file")),
+            _has_file_reference(process.get("file")),
+            _has_file_reference(module_file),
+        ]
     )
-    has_file = bool(file_obj.get("path") or file_obj.get("name"))
-    has_ip = bool(
-        network_src.get("ip")
-        or network_dst.get("ip")
-        or src_endpoint.get("ip")
-        or dst_endpoint.get("ip")
+    has_ip = any(
+        [
+            _endpoint_has_ip(network_src),
+            _endpoint_has_ip(network_dst),
+            _endpoint_has_ip(src_endpoint),
+            _endpoint_has_ip(dst_endpoint),
+        ]
     )
     has_device = bool(device.get("hostname"))
 
