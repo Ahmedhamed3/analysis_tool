@@ -15,6 +15,8 @@ SAMPLES = [
     ("zeek", "zeek_dns.json"),
     ("windows-security", "windows_security.ndjson"),
     ("windows-security", "windows_security.json"),
+    ("windows-security", "windows_security_4663.ndjson"),
+    ("windows-security", "windows_security_4663.json"),
     ("file-artifact", "file_artifact.ndjson"),
     ("file-artifact", "file_artifact.json"),
 ]

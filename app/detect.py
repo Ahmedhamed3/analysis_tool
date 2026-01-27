@@ -8,10 +8,10 @@ from app.plugins.zeek.detect import score_events as score_zeek
 
 
 SCORE_FUNCS = {
+    "windows-security": score_windows_security,
     "sysmon": score_sysmon,
     "suricata": score_suricata,
     "zeek": score_zeek,
-    "windows-security": score_windows_security,
     "file-artifact": score_file_artifact,
 }
 

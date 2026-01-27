@@ -1,7 +1,8 @@
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Iterator, Optional
+import re
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Union
 
 
 @dataclass
@@ -16,6 +17,27 @@ class WindowsSecurityNormalized:
     status: Optional[str] = None
     failure_reason: Optional[str] = None
     original_event: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class WindowsSecurityObjectAccessNormalized:
+    event_id: int
+    time_created: str
+    computer: Optional[str] = None
+    subject_username: Optional[str] = None
+    subject_domain: Optional[str] = None
+    subject_sid: Optional[str] = None
+    logon_id: Optional[str] = None
+    object_type: Optional[str] = None
+    object_name: Optional[str] = None
+    process_name: Optional[str] = None
+    process_id: Optional[str] = None
+    access_mask: Optional[str] = None
+    access_list: Optional[List[str]] = None
+    original_event: Optional[Dict[str, Any]] = None
+
+
+WindowsSecurityEventNormalized = Union[WindowsSecurityNormalized, WindowsSecurityObjectAccessNormalized]
 
 
 def _to_iso8601_utc(ts: Optional[Any]) -> str:
@@ -67,14 +89,40 @@ def _event_data_to_dict(event_data: Any) -> Dict[str, Any]:
     return {}
 
 
+def _properties_to_event_data(properties: Any) -> Dict[str, Any]:
+    if isinstance(properties, dict):
+        data = properties.get("Data") or properties.get("data")
+        if isinstance(data, list):
+            return _event_data_to_dict(data)
+        return _event_data_to_dict(properties)
+    if isinstance(properties, list):
+        result: Dict[str, Any] = {}
+        for item in properties:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("Name") or item.get("name")
+            value = item.get("Value")
+            if value is None:
+                value = item.get("value") or item.get("#text") or item.get("text")
+            if name:
+                result[str(name)] = value
+        return result
+    return {}
+
+
 def _extract_event_data(ev: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(ev.get("EventData"), (dict, list)):
         return _event_data_to_dict(ev.get("EventData"))
+    if isinstance(ev.get("Properties"), (dict, list)):
+        return _properties_to_event_data(ev.get("Properties"))
     event_wrapper = ev.get("Event")
     if isinstance(event_wrapper, dict):
         event_data = event_wrapper.get("EventData")
         if isinstance(event_data, (dict, list)):
             return _event_data_to_dict(event_data)
+        properties = event_wrapper.get("Properties")
+        if isinstance(properties, (dict, list)):
+            return _properties_to_event_data(properties)
     return {}
 
 
@@ -124,19 +172,92 @@ def _extract_fields(ev: Dict[str, Any]) -> WindowsSecurityNormalized:
     )
 
 
-def normalize_windows_security_event(ev: Dict[str, Any]) -> WindowsSecurityNormalized:
+def _normalize_access_list(access_list: Any) -> Optional[List[str]]:
+    if access_list is None:
+        return None
+    if isinstance(access_list, list):
+        return [str(entry) for entry in access_list if entry is not None]
+    if isinstance(access_list, str):
+        cleaned = access_list.strip()
+        if not cleaned:
+            return None
+        tokens = [token for token in re.split(r"[,\s]+", cleaned) if token]
+        if tokens and cleaned not in tokens:
+            return [cleaned] + tokens
+        return tokens or [cleaned]
+    return [str(access_list)]
+
+
+def _extract_object_access_fields(ev: Dict[str, Any]) -> WindowsSecurityObjectAccessNormalized:
+    event_id = _safe_int(
+        ev.get("EventID")
+        or _get_nested(ev, "System", "EventID")
+        or _get_nested(ev, "Event", "System", "EventID")
+    )
+    time_created = (
+        ev.get("TimeCreated")
+        or _get_nested(ev, "System", "TimeCreated")
+        or _get_nested(ev, "Event", "System", "TimeCreated")
+        or ev.get("Timestamp")
+    )
+    computer = (
+        ev.get("Computer")
+        or _get_nested(ev, "System", "Computer")
+        or _get_nested(ev, "Event", "System", "Computer")
+    )
+
+    event_data = _extract_event_data(ev)
+
+    subject_username = event_data.get("SubjectUserName") or ev.get("SubjectUserName")
+    subject_domain = event_data.get("SubjectDomainName") or ev.get("SubjectDomainName")
+    subject_sid = event_data.get("SubjectUserSid") or ev.get("SubjectUserSid")
+    logon_id = event_data.get("SubjectLogonId") or ev.get("SubjectLogonId")
+
+    object_type = event_data.get("ObjectType") or ev.get("ObjectType")
+    object_name = event_data.get("ObjectName") or ev.get("ObjectName")
+    process_name = event_data.get("ProcessName") or ev.get("ProcessName")
+    process_id = event_data.get("ProcessId") or ev.get("ProcessId")
+    access_mask = event_data.get("AccessMask") or ev.get("AccessMask")
+    access_list = _normalize_access_list(event_data.get("AccessList") or ev.get("AccessList"))
+
+    return WindowsSecurityObjectAccessNormalized(
+        event_id=event_id,
+        time_created=_to_iso8601_utc(time_created),
+        computer=str(computer) if computer else None,
+        subject_username=str(subject_username) if subject_username else None,
+        subject_domain=str(subject_domain) if subject_domain else None,
+        subject_sid=str(subject_sid) if subject_sid else None,
+        logon_id=str(logon_id) if logon_id else None,
+        object_type=str(object_type) if object_type else None,
+        object_name=str(object_name) if object_name else None,
+        process_name=str(process_name) if process_name else None,
+        process_id=str(process_id) if process_id else None,
+        access_mask=str(access_mask) if access_mask is not None else None,
+        access_list=access_list,
+        original_event=dict(ev) if isinstance(ev, dict) else None,
+    )
+
+
+def normalize_windows_security_event(ev: Dict[str, Any]) -> WindowsSecurityEventNormalized:
+    event_id = _safe_int(
+        ev.get("EventID")
+        or _get_nested(ev, "System", "EventID")
+        or _get_nested(ev, "Event", "System", "EventID")
+    )
+    if event_id == 4663:
+        return _extract_object_access_fields(ev)
     return _extract_fields(ev)
 
 
 def iter_windows_security_events_from_events(
     events: Iterable[Dict[str, Any]],
-) -> Iterator[WindowsSecurityNormalized]:
+) -> Iterator[WindowsSecurityEventNormalized]:
     for ev in events:
         if isinstance(ev, dict):
-            yield _extract_fields(ev)
+            yield normalize_windows_security_event(ev)
 
 
-def iter_windows_security_events(file_path: str) -> Iterator[WindowsSecurityNormalized]:
+def iter_windows_security_events(file_path: str) -> Iterator[WindowsSecurityEventNormalized]:
     with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as f:
         first = f.readline().strip()
 
@@ -149,7 +270,7 @@ def iter_windows_security_events(file_path: str) -> Iterator[WindowsSecurityNorm
         if isinstance(data, list):
             for ev in data:
                 if isinstance(ev, dict):
-                    yield _extract_fields(ev)
+                    yield normalize_windows_security_event(ev)
         return
 
     if first.startswith("{"):
@@ -161,14 +282,14 @@ def iter_windows_security_events(file_path: str) -> Iterator[WindowsSecurityNorm
                 if isinstance(events, list):
                     for ev in events:
                         if isinstance(ev, dict):
-                            yield _extract_fields(ev)
+                            yield normalize_windows_security_event(ev)
                     return
                 yield normalize_windows_security_event(data)
                 return
             if isinstance(data, list):
                 for ev in data:
                     if isinstance(ev, dict):
-                        yield _extract_fields(ev)
+                        yield normalize_windows_security_event(ev)
                 return
         except Exception:
             pass
@@ -184,6 +305,6 @@ def iter_windows_security_events(file_path: str) -> Iterator[WindowsSecurityNorm
                 except Exception:
                     continue
                 if isinstance(ev, dict):
-                    yield _extract_fields(ev)
+                    yield normalize_windows_security_event(ev)
 
     yield from _gen()
