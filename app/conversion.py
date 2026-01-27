@@ -20,6 +20,7 @@ from app.ocsf.constants import (
     REGISTRY_KEY_ACTIVITY_CLASS_UID,
     REGISTRY_VALUE_ACTIVITY_CLASS_UID,
     SECURITY_FINDING_CLASS_UID,
+    calc_type_uid,
 )
 from app.ocsf.unknown import map_parse_error_to_ocsf, map_unknown_event_to_ocsf
 from app.plugins.azure_ad_signin.pipeline import convert_azure_ad_signin_events_to_ocsf_jsonl
@@ -105,11 +106,14 @@ def _derive_evidence_flags(event: dict) -> dict:
     product = metadata.get("product")
     class_uid = event.get("class_uid")
     activity_id = event.get("activity_id")
+    type_uid = event.get("type_uid")
 
     actor = event.get("actor") or {}
     actor_process = actor.get("process") or {}
     file_obj = event.get("file") or {}
     file_hash = file_obj.get("hash") or {}
+    module_obj = event.get("module") or {}
+    module_file = module_obj.get("file") or {}
     dns_obj = event.get("dns") or {}
     http_obj = event.get("http") or {}
     auth_obj = event.get("auth")
@@ -154,17 +158,24 @@ def _derive_evidence_flags(event: dict) -> dict:
 
     alert_present = class_uid == SECURITY_FINDING_CLASS_UID
 
-    module_load = (
-        class_uid == MODULE_ACTIVITY_CLASS_UID
-        and activity_id == MODULE_ACTIVITY_LOAD_ID
-    )
+    module_load = class_uid == MODULE_ACTIVITY_CLASS_UID or bool(module_obj or module_file)
+    inject_type_uid = calc_type_uid(PROCESS_ACTIVITY_CLASS_UID, PROCESS_ACTIVITY_INJECT_ID)
+    open_type_uid = calc_type_uid(PROCESS_ACTIVITY_CLASS_UID, PROCESS_ACTIVITY_OPEN_ID)
     process_injection = (
-        class_uid == PROCESS_ACTIVITY_CLASS_UID
-        and activity_id == PROCESS_ACTIVITY_INJECT_ID
+        type_uid == inject_type_uid
+        or (
+            class_uid == PROCESS_ACTIVITY_CLASS_UID
+            and activity_id == PROCESS_ACTIVITY_INJECT_ID
+        )
+        or "injection_type" in event
     )
     process_access = (
-        class_uid == PROCESS_ACTIVITY_CLASS_UID
-        and activity_id == PROCESS_ACTIVITY_OPEN_ID
+        type_uid == open_type_uid
+        or (
+            class_uid == PROCESS_ACTIVITY_CLASS_UID
+            and activity_id == PROCESS_ACTIVITY_OPEN_ID
+        )
+        or event.get("actual_permissions") is not None
     )
     registry_key = class_uid == REGISTRY_KEY_ACTIVITY_CLASS_UID
     registry_value = class_uid == REGISTRY_VALUE_ACTIVITY_CLASS_UID
@@ -226,15 +237,22 @@ def _derive_context_flags(event: dict) -> dict:
             _has_file_reference(module_file),
         ]
     )
+    endpoint_present = [
+        network_src,
+        network_dst,
+        src_endpoint,
+        dst_endpoint,
+    ]
     has_ip = any(
         [
             _endpoint_has_ip(network_src),
             _endpoint_has_ip(network_dst),
             _endpoint_has_ip(src_endpoint),
             _endpoint_has_ip(dst_endpoint),
+            any(bool(endpoint) for endpoint in endpoint_present if isinstance(endpoint, dict)),
         ]
     )
-    has_device = bool(device.get("hostname"))
+    has_device = bool(device)
 
     return {
         "has_user": has_user,
