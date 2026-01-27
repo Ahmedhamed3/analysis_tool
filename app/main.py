@@ -62,6 +62,13 @@ HTML_PAGE = """<!doctype html>
         align-items: center;
         margin-bottom: 16px;
       }
+      .toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        color: #52606d;
+      }
       select {
         padding: 6px 10px;
         border-radius: 6px;
@@ -180,6 +187,11 @@ HTML_PAGE = """<!doctype html>
         white-space: pre-wrap;
         word-break: break-word;
       }
+      mark.highlight {
+        color: #0f172a;
+        border-radius: 3px;
+        padding: 0 2px;
+      }
     </style>
   </head>
   <body>
@@ -197,6 +209,10 @@ HTML_PAGE = """<!doctype html>
         <option value="proxy_http">Proxy HTTP</option>
       </select>
       <button class="primary" id="previewBtn">Convert</button>
+      <label class="toggle">
+        <input type="checkbox" id="highlightToggle" />
+        Highlight Mappings
+      </label>
     </div>
       <div class="detect-panel" id="detectPanel">
       <h3>Detection</h3>
@@ -229,12 +245,180 @@ HTML_PAGE = """<!doctype html>
       const sourceSelect = document.getElementById("sourceSelect");
       const originalPane = document.getElementById("originalPane");
       const unifiedPane = document.getElementById("unifiedPane");
+      const highlightToggle = document.getElementById("highlightToggle");
       const chainsContainer = document.getElementById("chainsContainer");
       const detectSource = document.getElementById("detectSource");
       const detectConfidence = document.getElementById("detectConfidence");
       const detectReason = document.getElementById("detectReason");
       const detectBreakdown = document.getElementById("detectBreakdown");
       let cachedOcsfEvents = [];
+      let cachedOriginalText = "";
+      let cachedUnifiedText = "";
+      const HIGHLIGHT_PALETTE = [
+        "#fde68a",
+        "#a7f3d0",
+        "#bfdbfe",
+        "#fecaca",
+        "#e9d5ff",
+        "#fbcfe8",
+        "#bae6fd",
+        "#bbf7d0",
+      ];
+      const PRIORITY_KEYS = new Set([
+        "processguid",
+        "processid",
+        "image",
+        "commandline",
+        "targetfilename",
+        "hashes",
+        "computer",
+        "user",
+        "username",
+        "hostname",
+        "id.orig_h",
+        "id.resp_h",
+        "query",
+        "host",
+        "uri",
+        "url",
+      ]);
+      const MAX_HIGHLIGHT_LINES = 25;
+
+      function escapeHtml(value) {
+        return value
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function escapeRegExp(value) {
+        return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      }
+
+      function hashToken(token) {
+        let hash = 0;
+        for (let i = 0; i < token.length; i += 1) {
+          hash = (hash << 5) - hash + token.charCodeAt(i);
+          hash |= 0;
+        }
+        return hash;
+      }
+
+      function assignTokenColor(token) {
+        const hash = hashToken(token);
+        const index = Math.abs(hash) % HIGHLIGHT_PALETTE.length;
+        return HIGHLIGHT_PALETTE[index];
+      }
+
+      function collectTokens(value, tokens, minLength) {
+        if (typeof value === "string") {
+          if (value.length >= minLength) {
+            tokens.add(value);
+          }
+          return;
+        }
+        if (typeof value === "number" && Number.isFinite(value)) {
+          tokens.add(String(value));
+          return;
+        }
+        if (Array.isArray(value)) {
+          value.forEach((item) => collectTokens(item, tokens, minLength));
+          return;
+        }
+        if (value && typeof value === "object") {
+          Object.values(value).forEach((item) => collectTokens(item, tokens, minLength));
+        }
+      }
+
+      function collectPriorityTokens(obj, tokens) {
+        if (!obj || typeof obj !== "object") {
+          return;
+        }
+        Object.entries(obj).forEach(([key, value]) => {
+          const keyLower = key.toLowerCase();
+          if (PRIORITY_KEYS.has(keyLower)) {
+            collectTokens(value, tokens, 1);
+          }
+          if (value && typeof value === "object") {
+            collectPriorityTokens(value, tokens);
+          }
+        });
+      }
+
+      function extractCandidateTokens(inputObj) {
+        const tokens = new Set();
+        collectTokens(inputObj, tokens, 3);
+        collectPriorityTokens(inputObj, tokens);
+        return Array.from(tokens);
+      }
+
+      function findMatchedTokens(inputObj, outputObj) {
+        const outputString = JSON.stringify(outputObj);
+        if (!outputString) {
+          return [];
+        }
+        const tokens = extractCandidateTokens(inputObj);
+        return tokens.filter((token) => outputString.includes(String(token)));
+      }
+
+      function applyTokenHighlights(text, tokenColorPairs) {
+        let highlighted = escapeHtml(text);
+        const sortedPairs = [...tokenColorPairs].sort(
+          (a, b) => String(b.token).length - String(a.token).length,
+        );
+        sortedPairs.forEach(({ token, color }) => {
+          const safeToken = escapeHtml(String(token));
+          if (!safeToken) {
+            return;
+          }
+          const regex = new RegExp(escapeRegExp(safeToken), "g");
+          highlighted = highlighted.replace(
+            regex,
+            `<mark class="highlight" style="background: ${color};">${safeToken}</mark>`,
+          );
+        });
+        return highlighted;
+      }
+
+      function renderJsonPanels() {
+        if (!highlightToggle.checked) {
+          originalPane.textContent = cachedOriginalText;
+          unifiedPane.textContent = cachedUnifiedText;
+          return;
+        }
+        const originalLines = cachedOriginalText.split("\\n");
+        const unifiedLines = cachedUnifiedText.split("\\n");
+        const totalLines = Math.max(originalLines.length, unifiedLines.length);
+        const originalOutput = [];
+        const unifiedOutput = [];
+
+        for (let i = 0; i < totalLines; i += 1) {
+          const originalLine = originalLines[i] || "";
+          const unifiedLine = unifiedLines[i] || "";
+          if (i < MAX_HIGHLIGHT_LINES) {
+            try {
+              const inputObj = JSON.parse(originalLine);
+              const outputObj = JSON.parse(unifiedLine);
+              const matchedTokens = findMatchedTokens(inputObj, outputObj);
+              const tokenColorPairs = matchedTokens.map((token) => ({
+                token,
+                color: assignTokenColor(String(token)),
+              }));
+              originalOutput.push(applyTokenHighlights(originalLine, tokenColorPairs));
+              unifiedOutput.push(applyTokenHighlights(unifiedLine, tokenColorPairs));
+              continue;
+            } catch (error) {
+              // fall through to plain rendering
+            }
+          }
+          originalOutput.push(escapeHtml(originalLine));
+          unifiedOutput.push(escapeHtml(unifiedLine));
+        }
+        originalPane.innerHTML = originalOutput.join("\\n");
+        unifiedPane.innerHTML = unifiedOutput.join("\\n");
+      }
 
       function parseNdjson(value) {
         if (!value) {
@@ -362,15 +546,17 @@ HTML_PAGE = """<!doctype html>
         });
         if (!response.ok) {
           const detail = await response.text();
-          originalPane.textContent = detail;
-          unifiedPane.textContent = "";
+          cachedOriginalText = detail;
+          cachedUnifiedText = "";
+          renderJsonPanels();
           cachedOcsfEvents = [];
           updateDetectionPanel(null, null);
           return;
         }
         const data = await response.json();
-        originalPane.textContent = data.original;
-        unifiedPane.textContent = data.unified_ndjson || "";
+        cachedOriginalText = data.original;
+        cachedUnifiedText = data.unified_ndjson || "";
+        renderJsonPanels();
         cachedOcsfEvents = parseNdjson(data.unified_ndjson || "");
         updateDetectionPanel(data.detection, data.error);
         renderChains([]);
@@ -397,6 +583,7 @@ HTML_PAGE = """<!doctype html>
 
       previewBtn.addEventListener("click", postPreview);
       correlateBtn.addEventListener("click", correlateProcesses);
+      highlightToggle.addEventListener("change", renderJsonPanels);
     </script>
   </body>
 </html>
