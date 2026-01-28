@@ -1,3 +1,4 @@
+import json
 from html import escape
 from string import Template
 from typing import Any, Dict, List, Optional
@@ -21,6 +22,11 @@ from app.plugins.windows_security.detect import score_events as score_windows_se
 from app.plugins.zeek.detect import score_events as score_zeek
 from app.plugins.zeek_http.detect import score_events as score_zeek_http
 from app.plugins.proxy_http.detect import score_events as score_proxy_http
+from app.ui.highlight import (
+    collect_unmapped_original_events,
+    extract_values,
+    highlight_json_text,
+)
 
 app = FastAPI(
     title="Log → OCSF Converter (MVP)",
@@ -95,6 +101,10 @@ HTML_PAGE_TEMPLATE = Template(
         border-color: #2563eb;
         color: #fff;
       }
+      .hl {
+        padding: 0 2px;
+        border-radius: 4px;
+      }
       .pane-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -158,6 +168,10 @@ HTML_PAGE_TEMPLATE = Template(
       <select id="sourceSelect" name="source">
         $source_options
       </select>
+      <label>
+        <input type="checkbox" name="highlight" value="1" $highlight_checked />
+        Highlight mappings/values
+      </label>
       <button class="primary" id="previewBtn" type="submit">Convert</button>
     </form>
     <div class="detect-panel" id="detectPanel">
@@ -200,10 +214,11 @@ def _format_confidence(confidence: Optional[float]) -> str:
 def _render_index(
     *,
     detection: Optional[Dict[str, Any]] = None,
-    original_text: str = "",
-    unified_text: str = "",
+    original_html: str = "",
+    unified_html: str = "",
     error_message: Optional[str] = None,
     selected_source: str = "auto",
+    highlight_enabled: bool = False,
 ) -> str:
     if not detection:
         detect_source = "—"
@@ -237,9 +252,30 @@ def _render_index(
         detect_confidence=escape(str(detect_confidence)),
         detect_reason=escape(str(detect_reason)),
         detect_breakdown=escape(str(detect_breakdown)),
-        original_text=escape(original_text),
-        unified_text=escape(unified_text),
+        original_text=original_html,
+        unified_text=unified_html,
+        highlight_checked="checked" if highlight_enabled else "",
     )
+
+
+def _pretty_json(obj: Any) -> str:
+    if isinstance(obj, list) and len(obj) == 1:
+        obj = obj[0]
+    return json.dumps(obj, indent=2, ensure_ascii=False)
+
+
+def _parse_ocsf_json_lines(lines: List[str]) -> Optional[Any]:
+    objects: List[Any] = []
+    for line in lines:
+        try:
+            objects.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    if not objects:
+        return None
+    if len(objects) == 1:
+        return objects[0]
+    return objects
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -251,6 +287,7 @@ async def index():
 async def index_post(
     file: UploadFile = File(...),
     source: str = Form("auto"),
+    highlight: Optional[str] = Form(None),
 ):
     upload = await _read_upload(file)
     error_message = None
@@ -278,12 +315,34 @@ async def index_post(
             auto=False,
             reason="Selected manually.",
         )
+    highlight_enabled = highlight is not None
+    original_json = _pretty_json(upload["events"])
+    ocsf_objects = _parse_ocsf_json_lines(unified_lines)
+    if ocsf_objects is None:
+        unified_json = "\n".join(unified_lines)
+    else:
+        unified_json = _pretty_json(ocsf_objects)
+    if highlight_enabled and ocsf_objects is not None:
+        original_values = extract_values(upload["events"])
+        ocsf_values = extract_values(ocsf_objects)
+        shared_values = original_values & ocsf_values
+        preserve_values = collect_unmapped_original_events(ocsf_objects)
+        original_panel_html = highlight_json_text(original_json, shared_values)
+        unified_panel_html = highlight_json_text(
+            unified_json,
+            shared_values,
+            preserve_values=preserve_values,
+        )
+    else:
+        original_panel_html = escape(original_json)
+        unified_panel_html = escape(unified_json)
     return _render_index(
         detection=detection,
-        original_text=upload["original_text"],
-        unified_text="\n".join(unified_lines),
+        original_html=original_panel_html,
+        unified_html=unified_panel_html,
         error_message=error_message,
         selected_source=source,
+        highlight_enabled=highlight_enabled,
     )
 
 
