@@ -47,13 +47,30 @@ def test_sysmon_eventids_7_8_10_12_13_14_end_to_end():
 
     outputs = [json.loads(line) for line in output_lines]
 
+    evidence_expectations = {
+        7: {"module_load": True},
+        8: {"process_injection": True},
+        10: {"process_access": True},
+        12: {"registry_key": True},
+        13: {"registry_value": True},
+        14: {"registry_value": True},
+    }
+
     for original, mapped in zip(events, outputs):
         event_id = original["EventID"]
         class_uid, activity_id = EXPECTED[event_id]
         assert mapped["class_uid"] == class_uid
-        assert mapped["type_uid"] == calc_type_uid(class_uid, activity_id)
+        if event_id == 7:
+            assert mapped["type_uid"] == MODULE_ACTIVITY_LOAD_ID
+            assert "module" in mapped
+            assert mapped["module"]["file"]["path"] == original["EventData"]["ImageLoaded"]
+        else:
+            assert mapped["type_uid"] == calc_type_uid(class_uid, activity_id)
         assert "unmapped" in mapped
         assert "original_event" in mapped["unmapped"]
         assert mapped["unmapped"]["original_event"]["EventID"] == event_id
         assert "actor" in mapped
         assert "device" in mapped
+        assert "evidence_flags" in mapped
+        for flag_name, expected_value in evidence_expectations[event_id].items():
+            assert mapped["evidence_flags"][flag_name] is expected_value
