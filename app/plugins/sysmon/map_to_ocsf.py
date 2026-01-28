@@ -303,7 +303,7 @@ def map_sysmon_eventid7_to_ocsf(ev: SysmonNormalized) -> Optional[Dict[str, Any]
     if ev.event_id != 7:
         return None
 
-    type_uid = calc_type_uid(MODULE_ACTIVITY_CLASS_UID, MODULE_ACTIVITY_LOAD_ID)
+    type_uid = MODULE_ACTIVITY_LOAD_ID
 
     actor, device = _build_actor_and_device(ev)
     if not actor:
