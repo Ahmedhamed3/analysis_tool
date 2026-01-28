@@ -1,6 +1,8 @@
+from html import escape
+from string import Template
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from app.correlation.process_chain import build_process_chains
@@ -42,7 +44,20 @@ SOURCE_SCORERS = {
     "proxy_http": score_proxy_http,
 }
 
-HTML_PAGE = """<!doctype html>
+SOURCE_OPTIONS = [
+    ("auto", "Auto Detect"),
+    ("sysmon", "Sysmon"),
+    ("azure_ad_signin", "Azure AD Sign-In"),
+    ("zeek", "Zeek DNS"),
+    ("zeek_http", "Zeek HTTP"),
+    ("suricata", "Suricata Alerts"),
+    ("windows-security", "Windows Security"),
+    ("file-artifact", "File Artifact"),
+    ("proxy_http", "Proxy HTTP"),
+]
+
+HTML_PAGE_TEMPLATE = Template(
+    """<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -61,13 +76,6 @@ HTML_PAGE = """<!doctype html>
         gap: 12px;
         align-items: center;
         margin-bottom: 16px;
-      }
-      .toggle {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        font-size: 13px;
-        color: #52606d;
       }
       select {
         padding: 6px 10px;
@@ -129,51 +137,6 @@ HTML_PAGE = """<!doctype html>
         text-transform: uppercase;
         letter-spacing: 0.04em;
       }
-      .panel-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-      }
-      .chain-results {
-        flex: 1;
-        overflow: auto;
-        padding-right: 4px;
-      }
-      .chain-card {
-        border: 1px solid #e4e7eb;
-        border-radius: 8px;
-        padding: 8px 12px;
-        background: #f9fafb;
-        margin-bottom: 12px;
-      }
-      .chain-card summary {
-        cursor: pointer;
-        font-weight: 600;
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-      }
-      .chain-meta {
-        font-size: 12px;
-        color: #52606d;
-      }
-      .chain-events {
-        list-style: none;
-        padding: 0;
-        margin: 12px 0 0 0;
-        display: flex;
-        flex-direction: column;
-        gap: 10px;
-      }
-      .chain-event {
-        border-left: 3px solid #2563eb;
-        padding-left: 10px;
-        font-size: 12px;
-      }
-      .chain-event strong {
-        font-size: 13px;
-      }
       pre {
         flex: 1;
         margin: 0;
@@ -187,412 +150,141 @@ HTML_PAGE = """<!doctype html>
         white-space: pre-wrap;
         word-break: break-word;
       }
-      mark.highlight {
-        color: #0f172a;
-        border-radius: 3px;
-        padding: 0 2px;
-      }
     </style>
   </head>
   <body>
-    <div class="controls">
-      <input type="file" id="fileInput" />
-      <select id="sourceSelect">
-        <option value="auto">Auto Detect</option>
-        <option value="sysmon">Sysmon</option>
-        <option value="azure_ad_signin">Azure AD Sign-In</option>
-        <option value="zeek">Zeek DNS</option>
-        <option value="zeek_http">Zeek HTTP</option>
-        <option value="suricata">Suricata Alerts</option>
-        <option value="windows-security">Windows Security</option>
-        <option value="file-artifact">File Artifact</option>
-        <option value="proxy_http">Proxy HTTP</option>
+    <form class="controls" method="post" action="/" enctype="multipart/form-data">
+      <input type="file" id="fileInput" name="file" required />
+      <select id="sourceSelect" name="source">
+        $source_options
       </select>
-      <button class="primary" id="previewBtn">Convert</button>
-      <label class="toggle">
-        <input type="checkbox" id="highlightToggle" />
-        Highlight Mappings
-      </label>
-    </div>
-      <div class="detect-panel" id="detectPanel">
+      <button class="primary" id="previewBtn" type="submit">Convert</button>
+    </form>
+    <div class="detect-panel" id="detectPanel">
       <h3>Detection</h3>
-      <div class="detect-row" id="detectSource">Source: —</div>
-      <div class="detect-row" id="detectConfidence">Confidence: —</div>
-      <div class="detect-row" id="detectReason">Reason: —</div>
-      <div class="detect-row" id="detectBreakdown">Breakdown: —</div>
+      <div class="detect-row" id="detectSource">Source: $detect_source</div>
+      <div class="detect-row" id="detectConfidence">Confidence: $detect_confidence</div>
+      <div class="detect-row" id="detectReason">Reason: $detect_reason</div>
+      <div class="detect-row" id="detectBreakdown">Breakdown: $detect_breakdown</div>
     </div>
     <div class="pane-grid">
       <div class="pane">
         <h2>Original Logs</h2>
-        <pre id="originalPane"></pre>
+        <pre id="originalPane">$original_text</pre>
       </div>
       <div class="pane">
         <h2>Unified Logs (OCSF)</h2>
-        <pre id="unifiedPane"></pre>
-      </div>
-      <div class="pane">
-        <div class="panel-header">
-          <h2>Process Behavior Chains</h2>
-          <button id="correlateBtn">Correlate Processes</button>
-        </div>
-        <div class="chain-results" id="chainsContainer"></div>
+        <pre id="unifiedPane">$unified_text</pre>
       </div>
     </div>
-    <script>
-      const fileInput = document.getElementById("fileInput");
-      const previewBtn = document.getElementById("previewBtn");
-      const correlateBtn = document.getElementById("correlateBtn");
-      const sourceSelect = document.getElementById("sourceSelect");
-      const originalPane = document.getElementById("originalPane");
-      const unifiedPane = document.getElementById("unifiedPane");
-      const highlightToggle = document.getElementById("highlightToggle");
-      const chainsContainer = document.getElementById("chainsContainer");
-      const detectSource = document.getElementById("detectSource");
-      const detectConfidence = document.getElementById("detectConfidence");
-      const detectReason = document.getElementById("detectReason");
-      const detectBreakdown = document.getElementById("detectBreakdown");
-      let cachedOcsfEvents = [];
-      let cachedOriginalText = "";
-      let cachedUnifiedText = "";
-      const HIGHLIGHT_PALETTE = [
-        "#fde68a",
-        "#a7f3d0",
-        "#bfdbfe",
-        "#fecaca",
-        "#e9d5ff",
-        "#fbcfe8",
-        "#bae6fd",
-        "#bbf7d0",
-      ];
-      const PRIORITY_KEYS = new Set([
-        "processguid",
-        "processid",
-        "image",
-        "commandline",
-        "targetfilename",
-        "hashes",
-        "computer",
-        "user",
-        "username",
-        "hostname",
-        "id.orig_h",
-        "id.resp_h",
-        "query",
-        "host",
-        "uri",
-        "url",
-      ]);
-      const MAX_HIGHLIGHT_LINES = 25;
-
-      function escapeHtml(value) {
-        return value
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;")
-          .replace(/'/g, "&#39;");
-      }
-
-      function escapeRegExp(value) {
-        return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      }
-
-      function hashToken(token) {
-        let hash = 0;
-        for (let i = 0; i < token.length; i += 1) {
-          hash = (hash << 5) - hash + token.charCodeAt(i);
-          hash |= 0;
-        }
-        return hash;
-      }
-
-      function assignTokenColor(token) {
-        const hash = hashToken(token);
-        const index = Math.abs(hash) % HIGHLIGHT_PALETTE.length;
-        return HIGHLIGHT_PALETTE[index];
-      }
-
-      function collectTokens(value, tokens, minLength) {
-        if (typeof value === "string") {
-          if (value.length >= minLength) {
-            tokens.add(value);
-          }
-          return;
-        }
-        if (typeof value === "number" && Number.isFinite(value)) {
-          tokens.add(String(value));
-          return;
-        }
-        if (Array.isArray(value)) {
-          value.forEach((item) => collectTokens(item, tokens, minLength));
-          return;
-        }
-        if (value && typeof value === "object") {
-          Object.values(value).forEach((item) => collectTokens(item, tokens, minLength));
-        }
-      }
-
-      function collectPriorityTokens(obj, tokens) {
-        if (!obj || typeof obj !== "object") {
-          return;
-        }
-        Object.entries(obj).forEach(([key, value]) => {
-          const keyLower = key.toLowerCase();
-          if (PRIORITY_KEYS.has(keyLower)) {
-            collectTokens(value, tokens, 1);
-          }
-          if (value && typeof value === "object") {
-            collectPriorityTokens(value, tokens);
-          }
-        });
-      }
-
-      function extractCandidateTokens(inputObj) {
-        const tokens = new Set();
-        collectTokens(inputObj, tokens, 3);
-        collectPriorityTokens(inputObj, tokens);
-        return Array.from(tokens);
-      }
-
-      function findMatchedTokens(inputObj, outputObj) {
-        const outputString = JSON.stringify(outputObj);
-        if (!outputString) {
-          return [];
-        }
-        const tokens = extractCandidateTokens(inputObj);
-        return tokens.filter((token) => outputString.includes(String(token)));
-      }
-
-      function applyTokenHighlights(text, tokenColorPairs) {
-        let highlighted = escapeHtml(text);
-        const sortedPairs = [...tokenColorPairs].sort(
-          (a, b) => String(b.token).length - String(a.token).length,
-        );
-        sortedPairs.forEach(({ token, color }) => {
-          const safeToken = escapeHtml(String(token));
-          if (!safeToken) {
-            return;
-          }
-          const regex = new RegExp(escapeRegExp(safeToken), "g");
-          highlighted = highlighted.replace(
-            regex,
-            `<mark class="highlight" style="background: ${color};">${safeToken}</mark>`,
-          );
-        });
-        return highlighted;
-      }
-
-      function renderJsonPanels() {
-        if (!highlightToggle.checked) {
-          originalPane.textContent = cachedOriginalText;
-          unifiedPane.textContent = cachedUnifiedText;
-          return;
-        }
-        const originalLines = cachedOriginalText.split("\\n");
-        const unifiedLines = cachedUnifiedText.split("\\n");
-        const totalLines = Math.max(originalLines.length, unifiedLines.length);
-        const originalOutput = [];
-        const unifiedOutput = [];
-
-        for (let i = 0; i < totalLines; i += 1) {
-          const originalLine = originalLines[i] || "";
-          const unifiedLine = unifiedLines[i] || "";
-          if (i < MAX_HIGHLIGHT_LINES) {
-            try {
-              const inputObj = JSON.parse(originalLine);
-              const outputObj = JSON.parse(unifiedLine);
-              const matchedTokens = findMatchedTokens(inputObj, outputObj);
-              const tokenColorPairs = matchedTokens.map((token) => ({
-                token,
-                color: assignTokenColor(String(token)),
-              }));
-              originalOutput.push(applyTokenHighlights(originalLine, tokenColorPairs));
-              unifiedOutput.push(applyTokenHighlights(unifiedLine, tokenColorPairs));
-              continue;
-            } catch (error) {
-              // fall through to plain rendering
-            }
-          }
-          originalOutput.push(escapeHtml(originalLine));
-          unifiedOutput.push(escapeHtml(unifiedLine));
-        }
-        originalPane.innerHTML = originalOutput.join("\\n");
-        unifiedPane.innerHTML = unifiedOutput.join("\\n");
-      }
-
-      function parseNdjson(value) {
-        if (!value) {
-          return [];
-        }
-        const lines = value.split("\\n").map((line) => line.trim()).filter(Boolean);
-        const events = [];
-        for (const line of lines) {
-          try {
-            events.push(JSON.parse(line));
-          } catch (error) {
-            console.warn("Failed to parse line", error);
-          }
-        }
-        return events;
-      }
-
-      function renderChains(chains) {
-        chainsContainer.innerHTML = "";
-        if (!chains || chains.length === 0) {
-          const empty = document.createElement("div");
-          empty.textContent = "No process chains to display.";
-          empty.className = "chain-meta";
-          chainsContainer.appendChild(empty);
-          return;
-        }
-        chains.forEach((chain) => {
-          const details = document.createElement("details");
-          details.className = "chain-card";
-          details.open = true;
-
-          const summary = document.createElement("summary");
-          summary.innerHTML = `<span>${chain.process_uid}</span>`;
-
-          const meta = document.createElement("span");
-          meta.className = "chain-meta";
-          const parent = chain.parent_process_uid ? chain.parent_process_uid : "None";
-          meta.textContent = `Parent: ${parent} · Events: ${chain.event_count}`;
-          summary.appendChild(meta);
-
-          details.appendChild(summary);
-
-          const list = document.createElement("ul");
-          list.className = "chain-events";
-
-          chain.events.forEach((event) => {
-            const item = document.createElement("li");
-            item.className = "chain-event";
-            const activity = event.activity_id ?? "n/a";
-            const typeUid = event.type_uid ?? "n/a";
-            const command = event.command_line ? event.command_line : "—";
-            const executable = event.executable ? event.executable : "Unknown executable";
-            const time = event.time ? event.time : "Unknown time";
-            const target = event.target_process
-              ? `Target: ${event.target_process.executable || "Unknown"} (${event.target_process.uid || "n/a"})`
-              : "";
-
-            item.innerHTML = `
-              <div><strong>${time}</strong> · Activity ${activity} / Type ${typeUid}</div>
-              <div>${executable}</div>
-              <div>${command}</div>
-              ${target ? `<div>${target}</div>` : ""}
-            `;
-            list.appendChild(item);
-          });
-
-          details.appendChild(list);
-          chainsContainer.appendChild(details);
-        });
-      }
-
-      function updateDetectionPanel(detection, errorMessage) {
-        if (!detection) {
-          detectSource.textContent = "Source: —";
-          detectConfidence.textContent = "Confidence: —";
-          detectReason.textContent = "Reason: —";
-          detectBreakdown.textContent = "Breakdown: —";
-          return;
-        }
-        detectSource.textContent = `Source: ${detection.source_type || "unknown"}`;
-        if (detection.auto && typeof detection.confidence === "number") {
-          detectConfidence.textContent = `Confidence: ${detection.confidence.toFixed(2)}`;
-        } else {
-          detectConfidence.textContent = "Confidence: —";
-        }
-        const reasonText = detection.reason ? detection.reason : "—";
-        detectReason.textContent = `Reason: ${reasonText}${errorMessage ? ` (${errorMessage})` : ""}`;
-        if (Array.isArray(detection.breakdown) && detection.breakdown.length) {
-          const breakdownLines = detection.breakdown.map((item) => {
-            const ratio = typeof item.ratio === "number" ? item.ratio.toFixed(2) : "0.00";
-            return `${item.source}: ${item.count}/${item.total} (${ratio})`;
-          });
-          detectBreakdown.textContent = `Breakdown: ${breakdownLines.join(", ")}`;
-        } else {
-          detectBreakdown.textContent = "Breakdown: —";
-        }
-      }
-
-      async function postPreview() {
-        const file = fileInput.files[0];
-        if (!file) {
-          return;
-        }
-        const formData = new FormData();
-        formData.append("file", file);
-        let endpoint = "/convert/sysmon/preview";
-        if (sourceSelect.value === "auto") {
-          endpoint = "/convert/auto/preview";
-        } else if (sourceSelect.value === "zeek") {
-          endpoint = "/convert/zeek/preview";
-        } else if (sourceSelect.value === "zeek_http") {
-          endpoint = "/convert/zeek_http/preview";
-        } else if (sourceSelect.value === "suricata") {
-          endpoint = "/convert/suricata/preview";
-        } else if (sourceSelect.value === "windows-security") {
-          endpoint = "/convert/windows-security/preview";
-        } else if (sourceSelect.value === "file-artifact") {
-          endpoint = "/convert/file-artifact/preview";
-        } else if (sourceSelect.value === "proxy_http") {
-          endpoint = "/convert/proxy_http/preview";
-        }
-        const response = await fetch(endpoint, {
-          method: "POST",
-          body: formData,
-        });
-        if (!response.ok) {
-          const detail = await response.text();
-          cachedOriginalText = detail;
-          cachedUnifiedText = "";
-          renderJsonPanels();
-          cachedOcsfEvents = [];
-          updateDetectionPanel(null, null);
-          return;
-        }
-        const data = await response.json();
-        cachedOriginalText = data.original;
-        cachedUnifiedText = data.unified_ndjson || "";
-        renderJsonPanels();
-        cachedOcsfEvents = parseNdjson(data.unified_ndjson || "");
-        updateDetectionPanel(data.detection, data.error);
-        renderChains([]);
-      }
-
-      async function correlateProcesses() {
-        if (!cachedOcsfEvents.length) {
-          renderChains([]);
-          return;
-        }
-        const response = await fetch("/correlate/process-chains", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(cachedOcsfEvents),
-        });
-        if (!response.ok) {
-          const detail = await response.text();
-          chainsContainer.textContent = detail;
-          return;
-        }
-        const data = await response.json();
-        renderChains(data);
-      }
-
-      previewBtn.addEventListener("click", postPreview);
-      correlateBtn.addEventListener("click", correlateProcesses);
-      highlightToggle.addEventListener("change", renderJsonPanels);
-    </script>
   </body>
 </html>
 """
+)
+
+
+def _build_source_options(selected_source: str) -> str:
+    options = []
+    for value, label in SOURCE_OPTIONS:
+        selected = " selected" if value == selected_source else ""
+        options.append(f'<option value="{value}"{selected}>{label}</option>')
+    return "\n        ".join(options)
+
+
+def _format_confidence(confidence: Optional[float]) -> str:
+    if confidence is None:
+        return "—"
+    return f"{confidence:.2f}"
+
+
+def _render_index(
+    *,
+    detection: Optional[Dict[str, Any]] = None,
+    original_text: str = "",
+    unified_text: str = "",
+    error_message: Optional[str] = None,
+    selected_source: str = "auto",
+) -> str:
+    if not detection:
+        detect_source = "—"
+        detect_confidence = "—"
+        detect_reason = "—"
+        detect_breakdown = "—"
+    else:
+        detect_source = detection.get("source_type") or "unknown"
+        confidence = detection.get("confidence")
+        detect_confidence = _format_confidence(confidence if isinstance(confidence, (int, float)) else None)
+        reason_text = detection.get("reason") or "—"
+        if error_message:
+            reason_text = f"{reason_text} ({error_message})"
+        detect_reason = reason_text
+        breakdown = detection.get("breakdown")
+        if isinstance(breakdown, list) and breakdown:
+            breakdown_lines = []
+            for item in breakdown:
+                source = item.get("source", "unknown")
+                count = item.get("count", 0)
+                total = item.get("total", 0)
+                ratio = item.get("ratio", 0)
+                ratio_text = f"{ratio:.2f}" if isinstance(ratio, (int, float)) else "0.00"
+                breakdown_lines.append(f"{source}: {count}/{total} ({ratio_text})")
+            detect_breakdown = ", ".join(breakdown_lines)
+        else:
+            detect_breakdown = "—"
+    return HTML_PAGE_TEMPLATE.safe_substitute(
+        source_options=_build_source_options(selected_source),
+        detect_source=escape(str(detect_source)),
+        detect_confidence=escape(str(detect_confidence)),
+        detect_reason=escape(str(detect_reason)),
+        detect_breakdown=escape(str(detect_breakdown)),
+        original_text=escape(original_text),
+        unified_text=escape(unified_text),
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return HTML_PAGE
+    return _render_index()
+
+
+@app.post("/", response_class=HTMLResponse)
+async def index_post(
+    file: UploadFile = File(...),
+    source: str = Form("auto"),
+):
+    upload = await _read_upload(file)
+    error_message = None
+    if source == "auto":
+        detection = summarize_event_detection(
+            upload["events"],
+            threshold=DETECTION_THRESHOLD,
+        )
+        detection["auto"] = True
+        unified_lines = list(
+            convert_events_to_ocsf_jsonl(upload["events"], threshold=DETECTION_THRESHOLD)
+        )
+        if detection.get("source_type") == "unknown":
+            error_message = "Unable to confidently auto-detect source."
+    else:
+        _validate_selected_source(source, upload["events"])
+        unified_lines = list(
+            convert_events_with_source_to_ocsf_jsonl(
+                upload["events"],
+                source_type=source,
+            )
+        )
+        detection = _build_detection_payload(
+            source,
+            auto=False,
+            reason="Selected manually.",
+        )
+    return _render_index(
+        detection=detection,
+        original_text=upload["original_text"],
+        unified_text="\n".join(unified_lines),
+        error_message=error_message,
+        selected_source=source,
+    )
 
 
 async def _read_upload(file: UploadFile) -> Dict[str, Any]:
