@@ -15,6 +15,7 @@ from app.conversion import (
     convert_events_to_ocsf_jsonl,
     convert_events_with_source_to_ocsf_jsonl,
 )
+from app.connectors.manager import ConnectorManager
 from app.detect import auto_detect_source, summarize_event_detection
 from app.formats.reader import iter_events_from_upload
 from app.plugins.azure_ad_signin.detect import score_events as score_azure_ad_signin
@@ -37,6 +38,18 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+connector_manager = ConnectorManager()
+
+
+@app.on_event("startup")
+async def startup_connectors() -> None:
+    await asyncio.to_thread(connector_manager.startup)
+
+
+@app.on_event("shutdown")
+async def shutdown_connectors() -> None:
+    await asyncio.to_thread(connector_manager.shutdown)
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 DETECTION_SAMPLE_SIZE = 10
@@ -696,6 +709,11 @@ async def _fetch_security_json(path: str, params: Optional[Dict[str, Any]] = Non
             status_code=502,
             detail="Security connector returned invalid JSON.",
         ) from exc
+
+
+@app.get("/api/connectors")
+async def connectors_status():
+    return JSONResponse(connector_manager.status())
 
 
 @app.get("/api/sysmon/status")
