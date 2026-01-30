@@ -13,8 +13,7 @@ class Checkpoint:
 @dataclass
 class ElasticCheckpoint:
     last_ts: str | None = None
-    last_id: str | None = None
-    last_cursor: list[object] | None = None
+    last_ids_at_ts: list[str] | None = None
     indices: str | list[str] | None = None
 
 
@@ -38,13 +37,18 @@ def load_elastic_checkpoint(path: str | Path) -> ElasticCheckpoint:
     except json.JSONDecodeError:
         return ElasticCheckpoint()
     last_ts = data.get("last_ts")
+    last_ids_at_ts = data.get("last_ids_at_ts")
     last_id = data.get("last_id")
     indices = data.get("indices")
-    last_cursor = data.get("last_cursor")
+    if not isinstance(last_ids_at_ts, list) and last_id:
+        last_ids_at_ts = [str(last_id)]
     return ElasticCheckpoint(
         last_ts=str(last_ts) if last_ts else None,
-        last_id=str(last_id) if last_id else None,
-        last_cursor=last_cursor if isinstance(last_cursor, list) else None,
+        last_ids_at_ts=[
+            str(item) for item in last_ids_at_ts if isinstance(item, (str, int))
+        ]
+        if isinstance(last_ids_at_ts, list)
+        else None,
         indices=indices,
     )
 
@@ -65,8 +69,7 @@ def save_elastic_checkpoint(path: str | Path, checkpoint: ElasticCheckpoint) -> 
         json.dumps(
             {
                 "last_ts": checkpoint.last_ts,
-                "last_id": checkpoint.last_id,
-                "last_cursor": checkpoint.last_cursor,
+                "last_ids_at_ts": checkpoint.last_ids_at_ts,
                 "indices": checkpoint.indices,
             }
         )

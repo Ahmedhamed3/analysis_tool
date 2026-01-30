@@ -155,8 +155,10 @@ python -m app.connectors.elastic --poll-seconds 10 --max-events 500 --http-port 
 Override indices and starting window if needed:
 
 ```bash
-python -m app.connectors.elastic --indices "logs-*" --start-ago-seconds 3600 --http-port 8789
+python -m app.connectors.elastic --indices "logs-*-default*" --start-ago-seconds 3600 --http-port 8789
 ```
+
+You can also override the default index pattern with the `ELASTIC_INDEX` environment variable.
 
 ### Output
 
@@ -187,6 +189,24 @@ The next run will re-export from the configured `--start-ago-seconds` window.
 ```bash
 GET http://127.0.0.1:8789/status
 GET http://127.0.0.1:8789/tail?limit=20
+```
+
+### How to generate test SIEM logs (Kibana Dev Tools)
+
+Use Kibana Dev Tools (Console) to insert documents into a data stream such as
+`logs-test-default`. Replace `<id>` with a unique id and adjust fields as needed:
+
+```json
+POST logs-test-default/_create/<id>
+{
+  "@timestamp": "2024-06-07T12:34:56Z",
+  "event": {
+    "dataset": "test",
+    "kind": "event",
+    "action": "sample"
+  },
+  "message": "Test SIEM log entry from Kibana Dev Tools."
+}
 ```
 
 ## Documentation

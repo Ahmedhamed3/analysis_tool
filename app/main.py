@@ -280,7 +280,9 @@ HTML_PAGE_TEMPLATE = Template(
         const sourceKey = getCurrentSource();
         if (sourceKey === "elastic") {
           statusFields.cursor_primary.textContent = `Last timestamp: ${data?.last_ts ?? "—"}`;
-          statusFields.cursor_secondary.textContent = `Last document id: ${data?.last_id ?? "—"}`;
+          statusFields.cursor_secondary.textContent = `Last ids at timestamp: ${
+            data?.last_ids_at_ts_count ?? "—"
+          }`;
         } else {
           statusFields.cursor_primary.textContent = `Last record id: ${data?.last_record_id ?? "—"}`;
           statusFields.cursor_secondary.textContent = `Last event time (UTC): ${

@@ -23,12 +23,13 @@ from app.utils.timeutil import to_utc_iso, utc_now_iso
 DEFAULT_POLL_SECONDS = 10
 DEFAULT_MAX_EVENTS = 500
 DEFAULT_START_AGO_SECONDS = 3600
-DEFAULT_INDICES = "logs-*"
+DEFAULT_INDICES = "logs-*-default*"
 DEFAULT_TAIL_SIZE = 200
 DEFAULT_ES_URL = "http://127.0.0.1:9200"
 DEFAULT_USERNAME = "elastic"
 CHECKPOINT_PATH = "state/elastic_checkpoint.json"
 BASE_OUTPUT_DIR = "out/raw/siem/elastic"
+MAX_LAST_IDS_AT_TS = 1000
 
 
 class TransientElasticsearchError(RuntimeError):
@@ -50,9 +51,7 @@ class ConnectorConfig:
 @dataclass
 class ElasticStatusState:
     last_ts: str | None = None
-    last_id: str | None = None
-    last_seq_no: int | None = None
-    last_primary_term: int | None = None
+    last_ids_at_ts_count: int = 0
     events_written_total: int = 0
     last_batch_count: int = 0
     last_error: str | None = None
@@ -64,9 +63,7 @@ class ElasticStatusState:
     def as_status(self) -> dict:
         return {
             "last_ts": self.last_ts,
-            "last_id": self.last_id,
-            "last_seq_no": self.last_seq_no,
-            "last_primary_term": self.last_primary_term,
+            "last_ids_at_ts_count": self.last_ids_at_ts_count,
             "events_written_total": self.events_written_total,
             "last_batch_count": self.last_batch_count,
             "last_error": self.last_error,
@@ -103,9 +100,7 @@ class ElasticConnector:
             checkpoint.indices = self.indices
         status_state = ElasticStatusState(
             last_ts=checkpoint.last_ts,
-            last_id=checkpoint.last_id,
-            last_seq_no=_cursor_value(checkpoint.last_cursor, 1),
-            last_primary_term=_cursor_value(checkpoint.last_cursor, 2),
+            last_ids_at_ts_count=len(checkpoint.last_ids_at_ts or []),
         )
         http_server = None
         if http_port is not None:
@@ -122,37 +117,25 @@ class ElasticConnector:
         try:
             while True:
                 try:
-                    hits = self.fetch_new_events(checkpoint, max_events)
+                    hits, next_checkpoint = self.fetch_new_events(checkpoint, max_events)
                     if hits:
                         records = list(self._format_records(hits))
                         written = self._write_records(records)
                         for record in records[-DEFAULT_TAIL_SIZE:]:
                             self.tail_buffer.append(record)
-                        last_hit = hits[-1]
-                        last_ts = to_utc_iso(
-                            (last_hit.get("_source") or {}).get("@timestamp")
-                        )
-                        last_seq_no = last_hit.get("_seq_no")
-                        last_primary_term = last_hit.get("_primary_term")
-                        checkpoint.last_ts = last_ts
-                        checkpoint.last_id = last_hit.get("_id")
-                        checkpoint.last_cursor = _build_cursor(
-                            last_ts, last_seq_no, last_primary_term
-                        )
+                        checkpoint = next_checkpoint
                         checkpoint.indices = self.indices
                         save_elastic_checkpoint(CHECKPOINT_PATH, checkpoint)
                         status_state.update(
                             last_ts=checkpoint.last_ts,
-                            last_id=checkpoint.last_id,
-                            last_seq_no=last_seq_no,
-                            last_primary_term=last_primary_term,
+                            last_ids_at_ts_count=len(checkpoint.last_ids_at_ts or []),
                             events_written_total=status_state.events_written_total
                             + written,
                             last_batch_count=written,
                             last_error=None,
                         )
                         log(
-                            f"Wrote {written} events (last_ts={checkpoint.last_ts}, last_id={checkpoint.last_id})"
+                            f"Wrote {written} events (last_ts={checkpoint.last_ts})"
                         )
                     else:
                         status_state.update(last_batch_count=0, last_error=None)
@@ -170,31 +153,69 @@ class ElasticConnector:
 
     def fetch_new_events(
         self, checkpoint: ElasticCheckpoint, max_events: int
-    ) -> list[dict]:
+    ) -> tuple[list[dict], ElasticCheckpoint]:
         hits: list[dict] = []
-        search_after = _normalize_cursor(checkpoint.last_cursor)
-        while True:
-            query = build_elastic_query(
-                checkpoint,
-                max_events=max_events,
-                start_ago_seconds=self.start_ago_seconds,
-                search_after=search_after,
-            )
-            payload = self._search(query)
-            batch = payload.get("hits", {}).get("hits", []) or []
-            if not batch:
-                break
-            hits.extend(batch)
-            if len(batch) < max_events:
-                break
-            last_sort = batch[-1].get("sort")
-            if not last_sort:
-                break
-            search_after = last_sort
-        return hits
+        search_after = None
+        pit_id = self._open_pit()
+        last_ts = checkpoint.last_ts
+        last_ts_dt = _parse_timestamp(last_ts) if last_ts else None
+        last_ids_at_ts = list(checkpoint.last_ids_at_ts or [])
+        last_ids_set = set(last_ids_at_ts)
+        try:
+            while True:
+                query = build_elastic_query(
+                    checkpoint.last_ts,
+                    max_events=max_events,
+                    start_ago_seconds=self.start_ago_seconds,
+                    pit_id=pit_id,
+                    search_after=search_after,
+                )
+                payload = self._search(query)
+                batch = payload.get("hits", {}).get("hits", []) or []
+                if not batch:
+                    break
+                for hit in batch:
+                    source = hit.get("_source") or {}
+                    timestamp = to_utc_iso(source.get("@timestamp"))
+                    doc_id = hit.get("_id")
+                    if (
+                        timestamp
+                        and last_ts
+                        and timestamp == last_ts
+                        and doc_id in last_ids_set
+                    ):
+                        continue
+                    hits.append(hit)
+                    if timestamp:
+                        timestamp_dt = _parse_timestamp(timestamp)
+                        if last_ts_dt is None or timestamp_dt > last_ts_dt:
+                            last_ts_dt = timestamp_dt
+                            last_ts = timestamp
+                            last_ids_at_ts = []
+                            last_ids_set = set()
+                        if timestamp == last_ts and doc_id:
+                            if doc_id not in last_ids_set:
+                                last_ids_at_ts.append(doc_id)
+                                last_ids_set.add(doc_id)
+                                if len(last_ids_at_ts) > MAX_LAST_IDS_AT_TS:
+                                    removed = last_ids_at_ts.pop(0)
+                                    last_ids_set.discard(removed)
+                if len(batch) < max_events:
+                    break
+                last_sort = batch[-1].get("sort")
+                if not last_sort:
+                    break
+                search_after = last_sort
+        finally:
+            self._close_pit(pit_id)
+        return hits, ElasticCheckpoint(
+            last_ts=last_ts,
+            last_ids_at_ts=last_ids_at_ts,
+            indices=checkpoint.indices,
+        )
 
     def _search(self, query: dict) -> dict:
-        url = f"{self.es_url}/{self.indices}/_search"
+        url = f"{self.es_url}/_search"
         data = json.dumps(query).encode("utf-8")
         request = urllib.request.Request(url, data=data, method="POST")
         request.add_header("Content-Type", "application/json")
@@ -223,6 +244,51 @@ class ElasticConnector:
             return json.loads(payload)
         except json.JSONDecodeError as exc:
             raise RuntimeError("Elasticsearch returned invalid JSON") from exc
+
+    def _open_pit(self) -> str:
+        url = f"{self.es_url}/{self.indices}/_pit?keep_alive=1m"
+        request = urllib.request.Request(url, data=b"{}", method="POST")
+        request.add_header("Content-Type", "application/json")
+        request.add_header("Authorization", _build_basic_auth(self.username, self.password))
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                if response.status < 200 or response.status >= 300:
+                    raise RuntimeError(
+                        _format_es_error(response.status, response.read())
+                    )
+                payload = response.read()
+        except urllib.error.HTTPError as exc:
+            body = exc.read()
+            raise RuntimeError(_format_es_error(exc.code, body)) from exc
+        except urllib.error.URLError as exc:
+            raise TransientElasticsearchError("Elasticsearch connection failed") from exc
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Elasticsearch returned invalid JSON") from exc
+        pit_id = data.get("id")
+        if not pit_id:
+            raise RuntimeError("Elasticsearch PIT response missing id")
+        return str(pit_id)
+
+    def _close_pit(self, pit_id: str) -> None:
+        url = f"{self.es_url}/_pit"
+        data = json.dumps({"id": pit_id}).encode("utf-8")
+        request = urllib.request.Request(url, data=data, method="DELETE")
+        request.add_header("Content-Type", "application/json")
+        request.add_header("Authorization", _build_basic_auth(self.username, self.password))
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                if response.status < 200 or response.status >= 300:
+                    raise RuntimeError(
+                        _format_es_error(response.status, response.read())
+                    )
+                response.read()
+        except urllib.error.HTTPError as exc:
+            body = exc.read()
+            raise RuntimeError(_format_es_error(exc.code, body)) from exc
+        except urllib.error.URLError:
+            return
 
     def _format_records(self, hits: Iterable[dict]) -> Iterable[dict]:
         for hit in hits:
@@ -255,14 +321,17 @@ class ElasticConnector:
 
 
 def build_elastic_query(
-    checkpoint: ElasticCheckpoint,
+    last_ts: str | None,
     *,
     max_events: int,
     start_ago_seconds: int,
+    pit_id: str,
     search_after: list[Any] | None = None,
 ) -> dict:
     filters: list[dict[str, Any]] = []
-    if search_after is None:
+    if last_ts:
+        filters.append({"range": {"@timestamp": {"gte": last_ts}}})
+    else:
         filters.append(
             {
                 "range": {
@@ -276,11 +345,11 @@ def build_elastic_query(
         "size": max_events,
         "sort": [
             {"@timestamp": "asc"},
-            {"_seq_no": "asc"},
-            {"_primary_term": "asc"},
+            {"_shard_doc": "asc"},
         ],
         "query": {"bool": {"filter": filters}} if filters else {"match_all": {}},
         "track_total_hits": False,
+        "pit": {"id": pit_id, "keep_alive": "1m"},
     }
     if search_after is not None:
         query["search_after"] = search_after
@@ -344,26 +413,6 @@ def _format_es_body(body: bytes | None) -> str:
     return json.dumps(parsed, ensure_ascii=False)
 
 
-def _normalize_cursor(cursor: list[Any] | None) -> list[Any] | None:
-    if isinstance(cursor, list) and len(cursor) == 3:
-        return cursor
-    return None
-
-
-def _build_cursor(
-    last_ts: str | None, last_seq_no: int | None, last_primary_term: int | None
-) -> list[Any] | None:
-    if last_ts is None or last_seq_no is None or last_primary_term is None:
-        return None
-    return [last_ts, last_seq_no, last_primary_term]
-
-
-def _cursor_value(cursor: list[Any] | None, index: int) -> int | None:
-    if isinstance(cursor, list) and len(cursor) == 3:
-        value = cursor[index]
-        if isinstance(value, int):
-            return value
-    return None
 
 
 def log(message: str) -> None:
