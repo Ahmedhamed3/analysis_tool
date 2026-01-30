@@ -220,10 +220,12 @@ HTML_PAGE_TEMPLATE = Template(
         </label>
         <button type="button" id="liveToggle">Live: OFF (Windows Sysmon)</button>
         <label for="liveLimit">
-          Live limit
+          Show last
           <select id="liveLimit">
-            <option value="20">20</option>
-            <option value="50" selected>50</option>
+            <option value="5">5</option>
+            <option value="10">10</option>
+            <option value="20" selected>20</option>
+            <option value="50">50</option>
             <option value="100">100</option>
           </select>
         </label>
@@ -390,7 +392,7 @@ HTML_PAGE_TEMPLATE = Template(
       }
 
       async function pollLiveSource() {
-        const limit = liveLimit.value || "50";
+        const limit = liveLimit.value || "20";
         const sourceKey = getCurrentSource();
         const config = sourceConfig[sourceKey] || { label: sourceKey, port: "??" };
         try {
@@ -437,6 +439,12 @@ HTML_PAGE_TEMPLATE = Template(
 
       liveSource.addEventListener("change", () => {
         updateLiveToggleLabel();
+        if (liveState.enabled) {
+          pollLiveSource();
+        }
+      });
+
+      liveLimit.addEventListener("change", () => {
         if (liveState.enabled) {
           pollLiveSource();
         }
@@ -585,8 +593,10 @@ def _extract_tail_items(payload: Any) -> List[Any]:
     return []
 
 
-def _wrap_tail_payload(source_key: str, payload: Any) -> Dict[str, Any]:
+def _wrap_tail_payload(source_key: str, payload: Any, limit: int | None = None) -> Dict[str, Any]:
     items = _extract_tail_items(payload)
+    if limit is not None:
+        items = items[-limit:]
     return {"items": [_coerce_envelope_item(source_key, item) for item in items]}
 
 
@@ -901,10 +911,10 @@ async def sysmon_status_proxy():
 
 
 @app.get("/api/sysmon/tail")
-async def sysmon_tail_proxy(limit: int = 50):
+async def sysmon_tail_proxy(limit: int = 20):
     safe_limit = max(1, min(limit, 1000))
     payload = await _fetch_sysmon_json("/tail", {"limit": safe_limit})
-    return JSONResponse(_wrap_tail_payload("sysmon", payload))
+    return JSONResponse(_wrap_tail_payload("sysmon", payload, safe_limit))
 
 
 @app.get("/api/security/status")
@@ -913,10 +923,10 @@ async def security_status_proxy():
 
 
 @app.get("/api/security/tail")
-async def security_tail_proxy(limit: int = 50):
+async def security_tail_proxy(limit: int = 20):
     safe_limit = max(1, min(limit, 1000))
     payload = await _fetch_security_json("/tail", {"limit": safe_limit})
-    return JSONResponse(_wrap_tail_payload("security", payload))
+    return JSONResponse(_wrap_tail_payload("security", payload, safe_limit))
 
 
 @app.get("/api/elastic/status")
@@ -925,10 +935,10 @@ async def elastic_status_proxy():
 
 
 @app.get("/api/elastic/tail")
-async def elastic_tail_proxy(limit: int = 50):
+async def elastic_tail_proxy(limit: int = 20):
     safe_limit = max(1, min(limit, 1000))
     payload = await _fetch_elastic_json("/tail", {"limit": safe_limit})
-    return JSONResponse(_wrap_tail_payload("elastic", payload))
+    return JSONResponse(_wrap_tail_payload("elastic", payload, safe_limit))
 
 
 @app.post("/convert/sysmon")

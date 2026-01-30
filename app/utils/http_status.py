@@ -116,11 +116,11 @@ class HttpStatusServer:
                     return
                 if parsed.path == "/tail":
                     params = parse_qs(parsed.query)
-                    limit = params.get("limit", ["50"])[0]
+                    limit = params.get("limit", ["20"])[0]
                     try:
                         limit_value = max(1, min(1000, int(limit)))
                     except ValueError:
-                        limit_value = 50
+                        limit_value = 20
                     data = list(tail_buffer)[-limit_value:]
                     if not data and tail_reader:
                         data = list(tail_reader(limit_value))
