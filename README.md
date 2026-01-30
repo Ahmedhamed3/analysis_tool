@@ -7,7 +7,9 @@ This project converts multiple evidence sources into OCSF NDJSON using plugins (
 When you start the FastAPI webapp, it automatically launches the Sysmon and Windows Security
 connectors (and reuses any already-running instances on their default ports). No manual
 `python -m app.connectors.*` invocation is required. On Windows, Sysmon and Security event
-collection may require running the webapp as Administrator.
+collection may require running the webapp as Administrator, especially for the Windows
+Security connector. If the Security connector fails to start, check
+`/api/connectors/logs?name=security` for a clear error message.
 
 ## Sysmon Direct Endpoint Connector
 
