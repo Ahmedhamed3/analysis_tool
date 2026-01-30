@@ -31,6 +31,7 @@ from app.ui.highlight import (
     extract_values,
     highlight_json_text,
 )
+from app.utils.timeutil import utc_now_iso
 
 app = FastAPI(
     title="Log → OCSF Converter (MVP)",
@@ -177,6 +178,11 @@ HTML_PAGE_TEMPLATE = Template(
         text-transform: uppercase;
         letter-spacing: 0.04em;
       }
+      .envelope-indicator {
+        font-size: 12px;
+        color: #334155;
+        margin-bottom: 8px;
+      }
       pre {
         flex: 1;
         margin: 0;
@@ -245,8 +251,9 @@ HTML_PAGE_TEMPLATE = Template(
         <pre id="originalPane">$original_text</pre>
       </div>
       <div class="pane">
-        <h2>Unified Logs (OCSF)</h2>
-        <pre id="unifiedPane">$unified_text</pre>
+        <h2>RAW ENVELOPE</h2>
+        <div class="envelope-indicator" id="envelopeIndicator">Envelope validation: —</div>
+        <pre id="rawEnvelopePane">$unified_text</pre>
       </div>
     </div>
     <script>
@@ -254,6 +261,7 @@ HTML_PAGE_TEMPLATE = Template(
         enabled: false,
         timerId: null,
       };
+      const requiredEnvelopeKeys = ["envelope_version", "source", "event", "raw"];
       const sourceConfig = {
         sysmon: { label: "Windows Sysmon", port: 8787 },
         security: { label: "Windows Security", port: 8788 },
@@ -263,6 +271,8 @@ HTML_PAGE_TEMPLATE = Template(
       const liveLimit = document.getElementById("liveLimit");
       const liveSource = document.getElementById("liveSource");
       const originalPane = document.getElementById("originalPane");
+      const rawEnvelopePane = document.getElementById("rawEnvelopePane");
+      const envelopeIndicator = document.getElementById("envelopeIndicator");
       const statusMessage = document.getElementById("sysmonStatusMessage");
       const statusFields = {
         cursor_primary: document.getElementById("cursorPrimary"),
@@ -296,11 +306,69 @@ HTML_PAGE_TEMPLATE = Template(
         statusFields.last_error.textContent = `Last error: ${data?.last_error ?? "—"}`;
       }
 
-      function renderTailEvents(events) {
+      function extractTailItems(payload) {
+        if (Array.isArray(payload)) {
+          return payload;
+        }
+        if (payload && Array.isArray(payload.items)) {
+          return payload.items;
+        }
+        return [];
+      }
+
+      function parseTailItem(item) {
+        if (typeof item === "string") {
+          try {
+            return { parsed: JSON.parse(item), raw: item, parsedOk: true };
+          } catch (error) {
+            return { parsed: item, raw: item, parsedOk: false };
+          }
+        }
+        return { parsed: item, raw: item, parsedOk: true };
+      }
+
+      function renderTailEvents(payload) {
+        const events = extractTailItems(payload);
         if (!Array.isArray(events) || events.length === 0) {
           return "No events returned yet.";
         }
         return events.map((ev) => JSON.stringify(ev)).join("\\n");
+      }
+
+      function renderRawEnvelope(payload) {
+        const events = extractTailItems(payload);
+        if (!Array.isArray(events) || events.length === 0) {
+          return "No envelope data returned yet.";
+        }
+        return events
+          .map((item) => {
+            const parsed = parseTailItem(item).parsed;
+            if (parsed && typeof parsed === "object") {
+              return JSON.stringify(parsed, null, 2);
+            }
+            return String(parsed ?? "");
+          })
+          .join("\\n\\n");
+      }
+
+      function updateEnvelopeIndicator(payload) {
+        const events = extractTailItems(payload);
+        if (!Array.isArray(events) || events.length === 0) {
+          envelopeIndicator.textContent = "Envelope validation: —";
+          return;
+        }
+        const latest = parseTailItem(events[events.length - 1]).parsed;
+        if (!latest || typeof latest !== "object" || Array.isArray(latest)) {
+          envelopeIndicator.textContent = `Envelope validation: ❌ Missing: ${requiredEnvelopeKeys.join(
+            ", "
+          )}`;
+          return;
+        }
+        const missing = requiredEnvelopeKeys.filter((key) => !(key in latest));
+        envelopeIndicator.textContent =
+          missing.length === 0
+            ? "Envelope validation: ✅ Valid Envelope"
+            : `Envelope validation: ❌ Missing: ${missing.join(", ")}`;
       }
 
       async function fetchJson(url) {
@@ -333,10 +401,14 @@ HTML_PAGE_TEMPLATE = Template(
           updateStatusFields(statusData);
           setStatusMessage("");
           originalPane.textContent = renderTailEvents(tailData);
+          rawEnvelopePane.textContent = renderRawEnvelope(tailData);
+          updateEnvelopeIndicator(tailData);
         } catch (error) {
           const message = `${config.label} connector not running. Start it with --http-port ${config.port}.`;
           setStatusMessage(message);
           originalPane.textContent = message;
+          rawEnvelopePane.textContent = message;
+          envelopeIndicator.textContent = "Envelope validation: —";
         }
       }
 
@@ -401,6 +473,8 @@ def _render_index(
     selected_source: str = "auto",
     highlight_enabled: bool = False,
 ) -> str:
+    if not unified_html:
+        unified_html = escape("Live envelopes appear here when Live is ON.")
     if not detection:
         detect_source = "—"
         detect_confidence = "—"
@@ -457,6 +531,63 @@ def _parse_ocsf_json_lines(lines: List[str]) -> Optional[Any]:
     if len(objects) == 1:
         return objects[0]
     return objects
+
+
+REQUIRED_ENVELOPE_KEYS = ("envelope_version", "source", "event", "raw")
+
+
+def _has_required_envelope_keys(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return all(key in payload for key in REQUIRED_ENVELOPE_KEYS)
+
+
+def _build_envelope(source_key: str, raw_payload: Any) -> Dict[str, Any]:
+    return {
+        "envelope_version": "1.0",
+        "source": {
+            "type": source_key,
+            "collector": {
+                "name": "ui-proxy",
+            },
+        },
+        "event": {
+            "time": {
+                "observed_utc": utc_now_iso(),
+            },
+        },
+        "raw": raw_payload,
+    }
+
+
+def _coerce_envelope_item(source_key: str, item: Any) -> Dict[str, Any]:
+    if isinstance(item, str):
+        try:
+            parsed = json.loads(item)
+        except json.JSONDecodeError:
+            parsed = None
+        if parsed is not None and _has_required_envelope_keys(parsed):
+            return parsed
+        raw_payload = parsed if parsed is not None else item
+        return _build_envelope(source_key, raw_payload)
+    if _has_required_envelope_keys(item):
+        return item
+    return _build_envelope(source_key, item)
+
+
+def _extract_tail_items(payload: Any) -> List[Any]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        items = payload.get("items")
+        if isinstance(items, list):
+            return items
+    return []
+
+
+def _wrap_tail_payload(source_key: str, payload: Any) -> Dict[str, Any]:
+    items = _extract_tail_items(payload)
+    return {"items": [_coerce_envelope_item(source_key, item) for item in items]}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -520,7 +651,7 @@ async def index_post(
     return _render_index(
         detection=detection,
         original_html=original_panel_html,
-        unified_html=unified_panel_html,
+        unified_html="",
         error_message=error_message,
         selected_source=source,
         highlight_enabled=highlight_enabled,
@@ -772,7 +903,8 @@ async def sysmon_status_proxy():
 @app.get("/api/sysmon/tail")
 async def sysmon_tail_proxy(limit: int = 50):
     safe_limit = max(1, min(limit, 1000))
-    return JSONResponse(await _fetch_sysmon_json("/tail", {"limit": safe_limit}))
+    payload = await _fetch_sysmon_json("/tail", {"limit": safe_limit})
+    return JSONResponse(_wrap_tail_payload("sysmon", payload))
 
 
 @app.get("/api/security/status")
@@ -783,7 +915,8 @@ async def security_status_proxy():
 @app.get("/api/security/tail")
 async def security_tail_proxy(limit: int = 50):
     safe_limit = max(1, min(limit, 1000))
-    return JSONResponse(await _fetch_security_json("/tail", {"limit": safe_limit}))
+    payload = await _fetch_security_json("/tail", {"limit": safe_limit})
+    return JSONResponse(_wrap_tail_payload("security", payload))
 
 
 @app.get("/api/elastic/status")
@@ -794,7 +927,8 @@ async def elastic_status_proxy():
 @app.get("/api/elastic/tail")
 async def elastic_tail_proxy(limit: int = 50):
     safe_limit = max(1, min(limit, 1000))
-    return JSONResponse(await _fetch_elastic_json("/tail", {"limit": safe_limit}))
+    payload = await _fetch_elastic_json("/tail", {"limit": safe_limit})
+    return JSONResponse(_wrap_tail_payload("elastic", payload))
 
 
 @app.post("/convert/sysmon")
