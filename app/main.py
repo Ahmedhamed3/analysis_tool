@@ -1,4 +1,7 @@
+import asyncio
 import json
+import urllib.parse
+import urllib.request
 from html import escape
 from string import Template
 from typing import Any, Dict, List, Optional
@@ -101,9 +104,23 @@ HTML_PAGE_TEMPLATE = Template(
         border-color: #2563eb;
         color: #fff;
       }
+      button.toggle-on {
+        background: #16a34a;
+        border-color: #16a34a;
+        color: #fff;
+      }
+      .live-controls {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
       .hl {
         padding: 0 2px;
         border-radius: 4px;
+      }
+      .status-note {
+        font-size: 12px;
+        color: #52606d;
       }
       .pane-grid {
         display: grid;
@@ -173,6 +190,17 @@ HTML_PAGE_TEMPLATE = Template(
         Highlight mappings/values
       </label>
       <button class="primary" id="previewBtn" type="submit">Convert</button>
+      <div class="live-controls">
+        <button type="button" id="liveToggle">Live Sysmon: OFF</button>
+        <label for="liveLimit">
+          Live limit
+          <select id="liveLimit">
+            <option value="20">20</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+          </select>
+        </label>
+      </div>
     </form>
     <div class="detect-panel" id="detectPanel">
       <h3>Detection</h3>
@@ -180,6 +208,15 @@ HTML_PAGE_TEMPLATE = Template(
       <div class="detect-row" id="detectConfidence">Confidence: $detect_confidence</div>
       <div class="detect-row" id="detectReason">Reason: $detect_reason</div>
       <div class="detect-row" id="detectBreakdown">Breakdown: $detect_breakdown</div>
+    </div>
+    <div class="detect-panel" id="connectorStatusPanel">
+      <h3>Connector Status</h3>
+      <div class="detect-row" id="sysmonLastRecord">Last record id: —</div>
+      <div class="detect-row" id="sysmonEventsWritten">Events written total: —</div>
+      <div class="detect-row" id="sysmonLastBatch">Last batch count: —</div>
+      <div class="detect-row" id="sysmonLastEventTime">Last event time (UTC): —</div>
+      <div class="detect-row" id="sysmonLastError">Last error: —</div>
+      <div class="status-note" id="sysmonStatusMessage"></div>
     </div>
     <div class="pane-grid">
       <div class="pane">
@@ -191,6 +228,92 @@ HTML_PAGE_TEMPLATE = Template(
         <pre id="unifiedPane">$unified_text</pre>
       </div>
     </div>
+    <script>
+      const sysmonState = {
+        enabled: false,
+        timerId: null,
+      };
+      const liveToggle = document.getElementById("liveToggle");
+      const liveLimit = document.getElementById("liveLimit");
+      const originalPane = document.getElementById("originalPane");
+      const statusMessage = document.getElementById("sysmonStatusMessage");
+      const statusFields = {
+        last_record_id: document.getElementById("sysmonLastRecord"),
+        events_written_total: document.getElementById("sysmonEventsWritten"),
+        last_batch_count: document.getElementById("sysmonLastBatch"),
+        last_event_time_utc: document.getElementById("sysmonLastEventTime"),
+        last_error: document.getElementById("sysmonLastError"),
+      };
+
+      function setStatusMessage(message) {
+        statusMessage.textContent = message || "";
+      }
+
+      function updateStatusFields(data) {
+        statusFields.last_record_id.textContent = `Last record id: ${data?.last_record_id ?? "—"}`;
+        statusFields.events_written_total.textContent = `Events written total: ${
+          data?.events_written_total ?? "—"
+        }`;
+        statusFields.last_batch_count.textContent = `Last batch count: ${data?.last_batch_count ?? "—"}`;
+        statusFields.last_event_time_utc.textContent = `Last event time (UTC): ${
+          data?.last_event_time_utc ?? "—"
+        }`;
+        statusFields.last_error.textContent = `Last error: ${data?.last_error ?? "—"}`;
+      }
+
+      function renderTailEvents(events) {
+        if (!Array.isArray(events) || events.length === 0) {
+          return "No Sysmon events returned yet.";
+        }
+        return events.map((ev) => JSON.stringify(ev)).join("\\n");
+      }
+
+      async function fetchJson(url) {
+        const response = await fetch(url, { method: "GET" });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response.json();
+      }
+
+      async function pollSysmon() {
+        const limit = liveLimit.value || "50";
+        try {
+          const [statusData, tailData] = await Promise.all([
+            fetchJson("/api/sysmon/status"),
+            fetchJson(`/api/sysmon/tail?limit=${encodeURIComponent(limit)}`),
+          ]);
+          updateStatusFields(statusData);
+          setStatusMessage("");
+          originalPane.textContent = renderTailEvents(tailData);
+        } catch (error) {
+          const message = "Sysmon connector not running. Start it with --http-port 8787.";
+          setStatusMessage(message);
+          originalPane.textContent = message;
+        }
+      }
+
+      function setLiveState(enabled) {
+        sysmonState.enabled = enabled;
+        if (enabled) {
+          liveToggle.textContent = "Live Sysmon: ON";
+          liveToggle.classList.add("toggle-on");
+          pollSysmon();
+          sysmonState.timerId = setInterval(pollSysmon, 2000);
+        } else {
+          liveToggle.textContent = "Live Sysmon: OFF";
+          liveToggle.classList.remove("toggle-on");
+          if (sysmonState.timerId) {
+            clearInterval(sysmonState.timerId);
+            sysmonState.timerId = null;
+          }
+        }
+      }
+
+      liveToggle.addEventListener("click", () => {
+        setLiveState(!sysmonState.enabled);
+      });
+    </script>
   </body>
 </html>
 """
@@ -484,6 +607,45 @@ def _build_preview_response(
     if error:
         payload["error"] = error
     return JSONResponse(payload)
+
+
+SYS_MON_PROXY_BASE = "http://127.0.0.1:8787"
+
+
+async def _fetch_sysmon_json(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    query = f"?{urllib.parse.urlencode(params)}" if params else ""
+    url = f"{SYS_MON_PROXY_BASE}{path}{query}"
+
+    def _load() -> bytes:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            return response.read()
+
+    try:
+        payload = await asyncio.to_thread(_load)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Sysmon connector not reachable.",
+        ) from exc
+
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Sysmon connector returned invalid JSON.",
+        ) from exc
+
+
+@app.get("/api/sysmon/status")
+async def sysmon_status_proxy():
+    return JSONResponse(await _fetch_sysmon_json("/status"))
+
+
+@app.get("/api/sysmon/tail")
+async def sysmon_tail_proxy(limit: int = 50):
+    safe_limit = max(1, min(limit, 1000))
+    return JSONResponse(await _fetch_sysmon_json("/tail", {"limit": safe_limit}))
 
 
 @app.post("/convert/sysmon")
