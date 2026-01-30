@@ -106,10 +106,16 @@ python -m app.connectors.security --poll-seconds 5 --max-events 500
 Enable the optional local verification server (binds to 127.0.0.1 only):
 
 ```bash
-python -m app.connectors.security --poll-seconds 5 --max-events 500 --http-port 8788
+python -m app.connectors.security --poll-seconds 5 --max-events 500 --http-port 8787
 ```
 
 ### Output
+
+Each NDJSON line is a RawEvent v1 envelope (no UI-proxy wrapping required): 
+
+```json
+{"envelope_version":"1.0","source":{"type":"security","vendor":"microsoft","product":"windows-security-auditing","channel":"Security","collector":{"name":"security-connector","instance_id":"HOST:security","host":"HOST"}},"event":{"time":{"observed_utc":"2024-03-04T10:11:12.000Z","created_utc":"2024-03-04T10:11:12.000Z"}},"ids":{"record_id":4096,"event_id":4673,"activity_id":null,"correlation_id":null,"dedupe_hash":"sha256:..."},"host":{"hostname":"HOST","os":"windows","timezone":"UTC+0200"},"severity":"high","tags":["live","security"],"raw":{"format":"json","data":{"record_id":4096,"event_id":4673,"provider":"Microsoft-Windows-Security-Auditing", "...":"..."},"rendered_message":null,"xml":"<Event>...</Event>"}} 
+```
 
 Events are appended to daily NDJSON files:
 
@@ -139,6 +145,16 @@ The next run will re-export from the current log start (no duplicates beyond the
 GET http://127.0.0.1:<port>/status
 GET http://127.0.0.1:<port>/tail?limit=20
 ```
+
+### Manual validation in the web UI
+
+1) Start the connector with the HTTP status server:
+   ```bash
+   python -m app.connectors.security --poll-seconds 5 --max-events 200 --http-port 8787
+   ```
+2) Start the web UI and switch **Live source** = Windows Security.
+3) Confirm both panels show matching counts and the RAW ENVELOPE validator stays green.
+4) Confirm `collector.name` is `security-connector` (not `ui-proxy`).
 
 ## Elastic SIEM Connector (Local Elasticsearch)
 
