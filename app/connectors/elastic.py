@@ -128,6 +128,7 @@ class ElasticConnector:
                         )
                         checkpoint.last_ts = last_ts
                         checkpoint.last_id = last_hit.get("_id")
+                        checkpoint.last_cursor = _normalize_cursor(last_hit.get("sort"))
                         checkpoint.indices = self.indices
                         save_elastic_checkpoint(CHECKPOINT_PATH, checkpoint)
                         status_state.update(
@@ -159,7 +160,7 @@ class ElasticConnector:
         self, checkpoint: ElasticCheckpoint, max_events: int
     ) -> list[dict]:
         hits: list[dict] = []
-        search_after = None
+        search_after = _normalize_cursor(checkpoint.last_cursor)
         while True:
             query = build_elastic_query(
                 checkpoint,
@@ -190,17 +191,20 @@ class ElasticConnector:
             with urllib.request.urlopen(request, timeout=10) as response:
                 if response.status == 429 or response.status >= 500:
                     raise TransientElasticsearchError(
-                        f"Elasticsearch returned {response.status}"
+                        _format_es_error(response.status, response.read())
                     )
                 if response.status < 200 or response.status >= 300:
-                    raise RuntimeError(f"Elasticsearch returned {response.status}")
+                    raise RuntimeError(
+                        _format_es_error(response.status, response.read())
+                    )
                 payload = response.read()
         except urllib.error.HTTPError as exc:
+            body = exc.read()
             if exc.code == 429 or exc.code >= 500:
                 raise TransientElasticsearchError(
-                    f"Elasticsearch returned {exc.code}"
+                    _format_es_error(exc.code, body)
                 ) from exc
-            raise RuntimeError(f"Elasticsearch returned {exc.code}") from exc
+            raise RuntimeError(_format_es_error(exc.code, body)) from exc
         except urllib.error.URLError as exc:
             raise TransientElasticsearchError("Elasticsearch connection failed") from exc
         try:
@@ -245,35 +249,21 @@ def build_elastic_query(
     start_ago_seconds: int,
     search_after: list[Any] | None = None,
 ) -> dict:
-    if checkpoint.last_ts and checkpoint.last_id:
-        filter_clause = {
-            "bool": {
-                "should": [
-                    {"range": {"@timestamp": {"gt": checkpoint.last_ts}}},
-                    {
-                        "bool": {
-                            "must": [
-                                {"term": {"@timestamp": checkpoint.last_ts}},
-                                {"range": {"_id": {"gt": checkpoint.last_id}}},
-                            ]
-                        }
-                    },
-                ],
-                "minimum_should_match": 1,
-            }
-        }
-    else:
-        filter_clause = {
-            "range": {
-                "@timestamp": {
-                    "gte": f"now-{start_ago_seconds}s",
+    filters: list[dict[str, Any]] = []
+    if search_after is None:
+        filters.append(
+            {
+                "range": {
+                    "@timestamp": {
+                        "gte": f"now-{start_ago_seconds}s",
+                    }
                 }
             }
-        }
+        )
     query = {
         "size": max_events,
         "sort": [{"@timestamp": "asc"}, {"_id": "asc"}],
-        "query": {"bool": {"filter": [filter_clause]}},
+        "query": {"bool": {"filter": filters}} if filters else {"match_all": {}},
         "track_total_hits": False,
     }
     if search_after is not None:
@@ -320,6 +310,30 @@ def _build_basic_auth(username: str, password: str) -> str:
     return f"Basic {base64.b64encode(token).decode('ascii')}"
 
 
+def _format_es_error(status: int, body: bytes | None) -> str:
+    body_text = _format_es_body(body)
+    return f"Elasticsearch returned {status}: {body_text}"
+
+
+def _format_es_body(body: bytes | None) -> str:
+    if not body:
+        return "<empty response>"
+    text = body.decode("utf-8", errors="replace").strip()
+    if not text:
+        return "<empty response>"
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+def _normalize_cursor(cursor: list[Any] | None) -> list[Any] | None:
+    if isinstance(cursor, list) and len(cursor) == 2:
+        return cursor
+    return None
+
+
 def log(message: str) -> None:
     timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     print(f"[{timestamp}] [connector:elastic] {message}", flush=True)
@@ -330,7 +344,7 @@ def parse_args(argv: list[str]) -> ConnectorConfig:
     parser.add_argument("--poll-seconds", type=int, default=DEFAULT_POLL_SECONDS)
     parser.add_argument("--max-events", type=int, default=DEFAULT_MAX_EVENTS)
     parser.add_argument("--http-port", type=int, default=None)
-    parser.add_argument("--indices", type=str, default=DEFAULT_INDICES)
+    parser.add_argument("--indices", type=str, default=_load_env_indices())
     parser.add_argument("--start-ago-seconds", type=int, default=DEFAULT_START_AGO_SECONDS)
     parser.add_argument("--es-url", type=str, default=DEFAULT_ES_URL)
     parser.add_argument("--username", type=str, default=DEFAULT_USERNAME)
@@ -355,6 +369,10 @@ def parse_args(argv: list[str]) -> ConnectorConfig:
 
 def _load_env_password() -> str | None:
     return os.environ.get("ELASTIC_PASSWORD")
+
+
+def _load_env_indices() -> str:
+    return os.environ.get("ELASTIC_INDEX", DEFAULT_INDICES)
 
 
 def main(argv: list[str] | None = None) -> None:

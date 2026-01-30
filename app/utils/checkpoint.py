@@ -14,6 +14,7 @@ class Checkpoint:
 class ElasticCheckpoint:
     last_ts: str | None = None
     last_id: str | None = None
+    last_cursor: list[object] | None = None
     indices: str | list[str] | None = None
 
 
@@ -39,9 +40,11 @@ def load_elastic_checkpoint(path: str | Path) -> ElasticCheckpoint:
     last_ts = data.get("last_ts")
     last_id = data.get("last_id")
     indices = data.get("indices")
+    last_cursor = data.get("last_cursor")
     return ElasticCheckpoint(
         last_ts=str(last_ts) if last_ts else None,
         last_id=str(last_id) if last_id else None,
+        last_cursor=last_cursor if isinstance(last_cursor, list) else None,
         indices=indices,
     )
 
@@ -63,6 +66,7 @@ def save_elastic_checkpoint(path: str | Path, checkpoint: ElasticCheckpoint) -> 
             {
                 "last_ts": checkpoint.last_ts,
                 "last_id": checkpoint.last_id,
+                "last_cursor": checkpoint.last_cursor,
                 "indices": checkpoint.indices,
             }
         )
