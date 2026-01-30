@@ -24,3 +24,18 @@ class OutputPaths:
 
 def build_output_paths(base_dir: str | Path, hostname: str) -> OutputPaths:
     return OutputPaths(base_dir=Path(base_dir), hostname=hostname)
+
+
+def build_elastic_output_path(
+    base_dir: str | Path, index: str, when: datetime | None = None
+) -> Path:
+    timestamp = when or datetime.now(timezone.utc)
+    return (
+        Path(base_dir)
+        / "local"
+        / index
+        / f"{timestamp:%Y}"
+        / f"{timestamp:%m}"
+        / f"{timestamp:%d}"
+        / "events.ndjson"
+    )

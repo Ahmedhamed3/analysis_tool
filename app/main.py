@@ -209,6 +209,7 @@ HTML_PAGE_TEMPLATE = Template(
           <select id="liveSource">
             <option value="sysmon" selected>Windows Sysmon</option>
             <option value="security">Windows Security</option>
+            <option value="elastic">Elastic</option>
           </select>
         </label>
         <button type="button" id="liveToggle">Live: OFF (Windows Sysmon)</button>
@@ -231,10 +232,10 @@ HTML_PAGE_TEMPLATE = Template(
     </div>
     <div class="detect-panel" id="connectorStatusPanel">
       <h3>Connector Status</h3>
-      <div class="detect-row" id="sysmonLastRecord">Last record id: —</div>
+      <div class="detect-row" id="cursorPrimary">Last cursor: —</div>
       <div class="detect-row" id="sysmonEventsWritten">Events written total: —</div>
       <div class="detect-row" id="sysmonLastBatch">Last batch count: —</div>
-      <div class="detect-row" id="sysmonLastEventTime">Last event time (UTC): —</div>
+      <div class="detect-row" id="cursorSecondary">Last cursor detail: —</div>
       <div class="detect-row" id="sysmonLastError">Last error: —</div>
       <div class="status-note" id="sysmonStatusMessage"></div>
     </div>
@@ -256,6 +257,7 @@ HTML_PAGE_TEMPLATE = Template(
       const sourceConfig = {
         sysmon: { label: "Windows Sysmon", port: 8787 },
         security: { label: "Windows Security", port: 8788 },
+        elastic: { label: "Elastic", port: 8789 },
       };
       const liveToggle = document.getElementById("liveToggle");
       const liveLimit = document.getElementById("liveLimit");
@@ -263,10 +265,10 @@ HTML_PAGE_TEMPLATE = Template(
       const originalPane = document.getElementById("originalPane");
       const statusMessage = document.getElementById("sysmonStatusMessage");
       const statusFields = {
-        last_record_id: document.getElementById("sysmonLastRecord"),
+        cursor_primary: document.getElementById("cursorPrimary"),
         events_written_total: document.getElementById("sysmonEventsWritten"),
         last_batch_count: document.getElementById("sysmonLastBatch"),
-        last_event_time_utc: document.getElementById("sysmonLastEventTime"),
+        cursor_secondary: document.getElementById("cursorSecondary"),
         last_error: document.getElementById("sysmonLastError"),
       };
 
@@ -275,14 +277,20 @@ HTML_PAGE_TEMPLATE = Template(
       }
 
       function updateStatusFields(data) {
-        statusFields.last_record_id.textContent = `Last record id: ${data?.last_record_id ?? "—"}`;
+        const sourceKey = getCurrentSource();
+        if (sourceKey === "elastic") {
+          statusFields.cursor_primary.textContent = `Last timestamp: ${data?.last_ts ?? "—"}`;
+          statusFields.cursor_secondary.textContent = `Last document id: ${data?.last_id ?? "—"}`;
+        } else {
+          statusFields.cursor_primary.textContent = `Last record id: ${data?.last_record_id ?? "—"}`;
+          statusFields.cursor_secondary.textContent = `Last event time (UTC): ${
+            data?.last_event_time_utc ?? "—"
+          }`;
+        }
         statusFields.events_written_total.textContent = `Events written total: ${
           data?.events_written_total ?? "—"
         }`;
         statusFields.last_batch_count.textContent = `Last batch count: ${data?.last_batch_count ?? "—"}`;
-        statusFields.last_event_time_utc.textContent = `Last event time (UTC): ${
-          data?.last_event_time_utc ?? "—"
-        }`;
         statusFields.last_error.textContent = `Last error: ${data?.last_error ?? "—"}`;
       }
 
@@ -659,6 +667,7 @@ def _build_preview_response(
 
 SYS_MON_PROXY_BASE = "http://127.0.0.1:8787"
 SECURITY_PROXY_BASE = "http://127.0.0.1:8788"
+ELASTIC_PROXY_BASE = "http://127.0.0.1:8789"
 
 
 async def _fetch_sysmon_json(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -711,6 +720,31 @@ async def _fetch_security_json(path: str, params: Optional[Dict[str, Any]] = Non
         ) from exc
 
 
+async def _fetch_elastic_json(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    query = f"?{urllib.parse.urlencode(params)}" if params else ""
+    url = f"{ELASTIC_PROXY_BASE}{path}{query}"
+
+    def _load() -> bytes:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            return response.read()
+
+    try:
+        payload = await asyncio.to_thread(_load)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Elastic connector not reachable.",
+        ) from exc
+
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Elastic connector returned invalid JSON.",
+        ) from exc
+
+
 @app.get("/api/connectors")
 async def connectors_status():
     return JSONResponse(connector_manager.status())
@@ -748,6 +782,17 @@ async def security_status_proxy():
 async def security_tail_proxy(limit: int = 50):
     safe_limit = max(1, min(limit, 1000))
     return JSONResponse(await _fetch_security_json("/tail", {"limit": safe_limit}))
+
+
+@app.get("/api/elastic/status")
+async def elastic_status_proxy():
+    return JSONResponse(await _fetch_elastic_json("/status"))
+
+
+@app.get("/api/elastic/tail")
+async def elastic_tail_proxy(limit: int = 50):
+    safe_limit = max(1, min(limit, 1000))
+    return JSONResponse(await _fetch_elastic_json("/tail", {"limit": safe_limit}))
 
 
 @app.post("/convert/sysmon")

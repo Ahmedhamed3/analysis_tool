@@ -25,6 +25,7 @@ class ConnectorSpec:
 CONNECTOR_REGISTRY: list[ConnectorSpec] = [
     ConnectorSpec(name="sysmon", module="app.connectors.sysmon", port=8787),
     ConnectorSpec(name="security", module="app.connectors.security", port=8788),
+    ConnectorSpec(name="elastic", module="app.connectors.elastic", port=8789),
 ]
 
 CONNECTOR_DEFAULT_ARGS: list[str] = ["--poll-seconds", "5", "--max-events", "500"]
