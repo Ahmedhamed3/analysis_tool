@@ -51,6 +51,8 @@ class ConnectorConfig:
 class ElasticStatusState:
     last_ts: str | None = None
     last_id: str | None = None
+    last_seq_no: int | None = None
+    last_primary_term: int | None = None
     events_written_total: int = 0
     last_batch_count: int = 0
     last_error: str | None = None
@@ -63,6 +65,8 @@ class ElasticStatusState:
         return {
             "last_ts": self.last_ts,
             "last_id": self.last_id,
+            "last_seq_no": self.last_seq_no,
+            "last_primary_term": self.last_primary_term,
             "events_written_total": self.events_written_total,
             "last_batch_count": self.last_batch_count,
             "last_error": self.last_error,
@@ -100,6 +104,8 @@ class ElasticConnector:
         status_state = ElasticStatusState(
             last_ts=checkpoint.last_ts,
             last_id=checkpoint.last_id,
+            last_seq_no=_cursor_value(checkpoint.last_cursor, 1),
+            last_primary_term=_cursor_value(checkpoint.last_cursor, 2),
         )
         http_server = None
         if http_port is not None:
@@ -126,14 +132,20 @@ class ElasticConnector:
                         last_ts = to_utc_iso(
                             (last_hit.get("_source") or {}).get("@timestamp")
                         )
+                        last_seq_no = last_hit.get("_seq_no")
+                        last_primary_term = last_hit.get("_primary_term")
                         checkpoint.last_ts = last_ts
                         checkpoint.last_id = last_hit.get("_id")
-                        checkpoint.last_cursor = _normalize_cursor(last_hit.get("sort"))
+                        checkpoint.last_cursor = _build_cursor(
+                            last_ts, last_seq_no, last_primary_term
+                        )
                         checkpoint.indices = self.indices
                         save_elastic_checkpoint(CHECKPOINT_PATH, checkpoint)
                         status_state.update(
                             last_ts=checkpoint.last_ts,
                             last_id=checkpoint.last_id,
+                            last_seq_no=last_seq_no,
+                            last_primary_term=last_primary_term,
                             events_written_total=status_state.events_written_total
                             + written,
                             last_batch_count=written,
@@ -262,7 +274,11 @@ def build_elastic_query(
         )
     query = {
         "size": max_events,
-        "sort": [{"@timestamp": "asc"}, {"_id": "asc"}],
+        "sort": [
+            {"@timestamp": "asc"},
+            {"_seq_no": "asc"},
+            {"_primary_term": "asc"},
+        ],
         "query": {"bool": {"filter": filters}} if filters else {"match_all": {}},
         "track_total_hits": False,
     }
@@ -329,8 +345,24 @@ def _format_es_body(body: bytes | None) -> str:
 
 
 def _normalize_cursor(cursor: list[Any] | None) -> list[Any] | None:
-    if isinstance(cursor, list) and len(cursor) == 2:
+    if isinstance(cursor, list) and len(cursor) == 3:
         return cursor
+    return None
+
+
+def _build_cursor(
+    last_ts: str | None, last_seq_no: int | None, last_primary_term: int | None
+) -> list[Any] | None:
+    if last_ts is None or last_seq_no is None or last_primary_term is None:
+        return None
+    return [last_ts, last_seq_no, last_primary_term]
+
+
+def _cursor_value(cursor: list[Any] | None, index: int) -> int | None:
+    if isinstance(cursor, list) and len(cursor) == 3:
+        value = cursor[index]
+        if isinstance(value, int):
+            return value
     return None
 
 
