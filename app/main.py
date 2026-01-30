@@ -191,7 +191,14 @@ HTML_PAGE_TEMPLATE = Template(
       </label>
       <button class="primary" id="previewBtn" type="submit">Convert</button>
       <div class="live-controls">
-        <button type="button" id="liveToggle">Live Sysmon: OFF</button>
+        <label for="liveSource">
+          Live source
+          <select id="liveSource">
+            <option value="sysmon" selected>Windows Sysmon</option>
+            <option value="security">Windows Security</option>
+          </select>
+        </label>
+        <button type="button" id="liveToggle">Live: OFF (Windows Sysmon)</button>
         <label for="liveLimit">
           Live limit
           <select id="liveLimit">
@@ -229,12 +236,17 @@ HTML_PAGE_TEMPLATE = Template(
       </div>
     </div>
     <script>
-      const sysmonState = {
+      const liveState = {
         enabled: false,
         timerId: null,
       };
+      const sourceConfig = {
+        sysmon: { label: "Windows Sysmon", port: 8787 },
+        security: { label: "Windows Security", port: 8788 },
+      };
       const liveToggle = document.getElementById("liveToggle");
       const liveLimit = document.getElementById("liveLimit");
+      const liveSource = document.getElementById("liveSource");
       const originalPane = document.getElementById("originalPane");
       const statusMessage = document.getElementById("sysmonStatusMessage");
       const statusFields = {
@@ -263,7 +275,7 @@ HTML_PAGE_TEMPLATE = Template(
 
       function renderTailEvents(events) {
         if (!Array.isArray(events) || events.length === 0) {
-          return "No Sysmon events returned yet.";
+          return "No events returned yet.";
         }
         return events.map((ev) => JSON.stringify(ev)).join("\\n");
       }
@@ -276,43 +288,66 @@ HTML_PAGE_TEMPLATE = Template(
         return response.json();
       }
 
-      async function pollSysmon() {
+      function getCurrentSource() {
+        return liveSource.value || "sysmon";
+      }
+
+      function updateLiveToggleLabel() {
+        const sourceKey = getCurrentSource();
+        const label = sourceConfig[sourceKey]?.label ?? sourceKey;
+        liveToggle.textContent = liveState.enabled ? `Live: ON (${label})` : `Live: OFF (${label})`;
+      }
+
+      async function pollLiveSource() {
         const limit = liveLimit.value || "50";
+        const sourceKey = getCurrentSource();
+        const config = sourceConfig[sourceKey] || { label: sourceKey, port: "??" };
         try {
           const [statusData, tailData] = await Promise.all([
-            fetchJson("/api/sysmon/status"),
-            fetchJson(`/api/sysmon/tail?limit=${encodeURIComponent(limit)}`),
+            fetchJson(`/api/${sourceKey}/status`),
+            fetchJson(`/api/${sourceKey}/tail?limit=${encodeURIComponent(limit)}`),
           ]);
           updateStatusFields(statusData);
           setStatusMessage("");
           originalPane.textContent = renderTailEvents(tailData);
         } catch (error) {
-          const message = "Sysmon connector not running. Start it with --http-port 8787.";
+          const message = `${config.label} connector not running. Start it with --http-port ${config.port}.`;
           setStatusMessage(message);
           originalPane.textContent = message;
         }
       }
 
       function setLiveState(enabled) {
-        sysmonState.enabled = enabled;
+        liveState.enabled = enabled;
+        updateLiveToggleLabel();
         if (enabled) {
-          liveToggle.textContent = "Live Sysmon: ON";
           liveToggle.classList.add("toggle-on");
-          pollSysmon();
-          sysmonState.timerId = setInterval(pollSysmon, 2000);
+          pollLiveSource();
+          if (liveState.timerId) {
+            clearInterval(liveState.timerId);
+          }
+          liveState.timerId = setInterval(pollLiveSource, 2000);
         } else {
-          liveToggle.textContent = "Live Sysmon: OFF";
           liveToggle.classList.remove("toggle-on");
-          if (sysmonState.timerId) {
-            clearInterval(sysmonState.timerId);
-            sysmonState.timerId = null;
+          if (liveState.timerId) {
+            clearInterval(liveState.timerId);
+            liveState.timerId = null;
           }
         }
       }
 
       liveToggle.addEventListener("click", () => {
-        setLiveState(!sysmonState.enabled);
+        setLiveState(!liveState.enabled);
       });
+
+      liveSource.addEventListener("change", () => {
+        updateLiveToggleLabel();
+        if (liveState.enabled) {
+          pollLiveSource();
+        }
+      });
+
+      updateLiveToggleLabel();
     </script>
   </body>
 </html>
@@ -610,6 +645,7 @@ def _build_preview_response(
 
 
 SYS_MON_PROXY_BASE = "http://127.0.0.1:8787"
+SECURITY_PROXY_BASE = "http://127.0.0.1:8788"
 
 
 async def _fetch_sysmon_json(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -637,6 +673,31 @@ async def _fetch_sysmon_json(path: str, params: Optional[Dict[str, Any]] = None)
         ) from exc
 
 
+async def _fetch_security_json(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    query = f"?{urllib.parse.urlencode(params)}" if params else ""
+    url = f"{SECURITY_PROXY_BASE}{path}{query}"
+
+    def _load() -> bytes:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            return response.read()
+
+    try:
+        payload = await asyncio.to_thread(_load)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Security connector not reachable.",
+        ) from exc
+
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Security connector returned invalid JSON.",
+        ) from exc
+
+
 @app.get("/api/sysmon/status")
 async def sysmon_status_proxy():
     return JSONResponse(await _fetch_sysmon_json("/status"))
@@ -646,6 +707,17 @@ async def sysmon_status_proxy():
 async def sysmon_tail_proxy(limit: int = 50):
     safe_limit = max(1, min(limit, 1000))
     return JSONResponse(await _fetch_sysmon_json("/tail", {"limit": safe_limit}))
+
+
+@app.get("/api/security/status")
+async def security_status_proxy():
+    return JSONResponse(await _fetch_security_json("/status"))
+
+
+@app.get("/api/security/tail")
+async def security_tail_proxy(limit: int = 50):
+    safe_limit = max(1, min(limit, 1000))
+    return JSONResponse(await _fetch_security_json("/tail", {"limit": safe_limit}))
 
 
 @app.post("/convert/sysmon")
