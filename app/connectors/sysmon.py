@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import socket
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from app.utils.checkpoint import Checkpoint, load_checkpoint, save_checkpoint
 from app.utils.http_status import HttpStatusServer, StatusState, tail_ndjson
 from app.utils.ndjson_writer import append_ndjson
 from app.utils.pathing import build_output_paths
-from app.utils.timeutil import to_utc_iso
+from app.utils.timeutil import to_utc_iso, utc_now_iso
 
 CHANNEL = "Microsoft-Windows-Sysmon/Operational"
 DEFAULT_POLL_SECONDS = 5
@@ -65,7 +66,7 @@ class SysmonConnector:
                 break
             for event in batch:
                 xml = win32evtlog.EvtRender(event, win32evtlog.EvtRenderEventXml)
-                parsed = parse_event_xml(xml)
+                parsed = parse_event_xml(xml, self.hostname)
                 if parsed:
                     events.append(parsed)
         return events
@@ -90,7 +91,7 @@ class SysmonConnector:
             xml = xml.strip()
             if not xml:
                 continue
-            parsed = parse_event_xml(xml)
+            parsed = parse_event_xml(xml, self.hostname)
             if parsed:
                 events.append(parsed)
         return events
@@ -127,14 +128,14 @@ class SysmonConnector:
                         for event in events:
                             self.tail_buffer.append(event)
                         checkpoint.last_record_id = max(
-                            event["record_id"] for event in events
+                            event["event"]["ids"]["record_id"] for event in events
                         )
                         save_checkpoint(CHECKPOINT_PATH, checkpoint)
                         status_state.update(
                             last_record_id=checkpoint.last_record_id,
                             events_written_total=status_state.events_written_total + written,
                             last_batch_count=written,
-                            last_event_time_utc=events[-1].get("time_created_utc"),
+                            last_event_time_utc=events[-1]["event"]["time"]["created_utc"],
                             last_error=None,
                         )
                         log(
@@ -155,7 +156,7 @@ class SysmonConnector:
                 http_server.stop()
 
 
-def parse_event_xml(xml: str) -> dict[str, Any] | None:
+def parse_event_xml(xml: str, hostname: str) -> dict[str, Any] | None:
     try:
         root = ElementTree.fromstring(xml)
     except ElementTree.ParseError:
@@ -175,51 +176,81 @@ def parse_event_xml(xml: str) -> dict[str, Any] | None:
     time_node = system.find("e:TimeCreated", ns) if ns else system.find("TimeCreated")
     if time_node is not None:
         time_created = to_utc_iso(time_node.attrib.get("SystemTime"))
-    provider = None
-    provider_node = system.find("e:Provider", ns) if ns else system.find("Provider")
-    if provider_node is not None:
-        provider = provider_node.attrib.get("Name")
-    channel = system.findtext("e:Channel", namespaces=ns) if ns else system.findtext("Channel")
-    event_id = system.findtext("e:EventID", namespaces=ns) if ns else system.findtext("EventID")
-    level = system.findtext("e:Level", namespaces=ns) if ns else system.findtext("Level")
-    computer = system.findtext("e:Computer", namespaces=ns) if ns else system.findtext("Computer")
-    event_data_node = root.find("e:EventData", ns) if ns else root.find("EventData")
-    event_data = parse_event_data(event_data_node, ns)
+    if not time_created:
+        return None
+    event_id_text = system.findtext("e:EventID", namespaces=ns) if ns else system.findtext("EventID")
+    if not event_id_text:
+        return None
+    event_id = int(event_id_text)
+    level_text = system.findtext("e:Level", namespaces=ns) if ns else system.findtext("Level")
+    level = int(level_text) if level_text else None
+    severity = map_severity(level)
+    timezone_name = local_timezone_name()
+    dedupe_hash = build_dedupe_hash(hostname, record_id, event_id, time_created)
     return {
-        "record_id": record_id,
-        "time_created_utc": time_created,
-        "provider": provider,
-        "channel": channel,
-        "event_id": int(event_id) if event_id else None,
-        "level": int(level) if level else None,
-        "computer": computer,
-        "event_data": event_data,
-        "raw_xml": xml,
+        "envelope_version": "1.0",
+        "source": {
+            "type": "sysmon",
+            "vendor": "microsoft",
+            "product": "sysmon",
+            "channel": CHANNEL,
+            "collector": {
+                "name": "sysmon-connector",
+                "instance_id": f"{hostname}:sysmon",
+                "host": hostname,
+            },
+        },
+        "event": {
+            "time": {
+                "observed_utc": utc_now_iso(),
+                "created_utc": time_created,
+            },
+            "ids": {
+                "record_id": record_id,
+                "event_id": event_id,
+                "activity_id": None,
+                "correlation_id": None,
+                "dedupe_hash": dedupe_hash,
+            },
+            "host": {
+                "hostname": hostname,
+                "os": "windows",
+                "timezone": timezone_name,
+            },
+            "severity": severity,
+            "tags": ["live", "sysmon"],
+        },
+        "raw": {
+            "format": "xml",
+            "data": xml,
+            "rendered_message": None,
+        },
     }
 
 
-def parse_event_data(
-    node: ElementTree.Element | None, ns: dict[str, str] | None = None
-) -> dict[str, Any]:
-    if node is None:
-        return {}
-    data: dict[str, Any] = {}
-    index = 0
-    ns = ns or {}
-    tag = "e:Data" if ns else "Data"
-    for child in node.findall(tag, ns):
-        index += 1
-        name = child.attrib.get("Name") or f"param{index}"
-        value = child.text or ""
-        if name in data:
-            existing = data[name]
-            if isinstance(existing, list):
-                existing.append(value)
-            else:
-                data[name] = [existing, value]
-        else:
-            data[name] = value
-    return data
+def map_severity(level: int | None) -> str:
+    if level == 4:
+        return "information"
+    if level == 3:
+        return "warning"
+    if level == 2:
+        return "error"
+    if level == 1:
+        return "critical"
+    return "unknown"
+
+
+def local_timezone_name() -> str:
+    offset = datetime.now().astimezone().strftime("%z") or "+0000"
+    return f"UTC{offset}"
+
+
+def build_dedupe_hash(
+    hostname: str, record_id: int, event_id: int, created_utc: str
+) -> str:
+    payload = f"{hostname}|{CHANNEL}|{record_id}|{event_id}|{created_utc}"
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
 
 
 def log(message: str) -> None:
