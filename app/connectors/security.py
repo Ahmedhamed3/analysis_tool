@@ -15,7 +15,8 @@ from app.utils.checkpoint import Checkpoint, load_checkpoint, save_checkpoint
 from app.utils.http_status import HttpStatusServer, StatusState, tail_ndjson
 from app.utils.ndjson_writer import append_ndjson
 from app.utils.pathing import build_output_paths
-from app.utils.timeutil import to_utc_iso
+from app.utils.raw_envelope import build_security_raw_event, local_timezone_name
+from app.utils.timeutil import to_utc_iso, utc_now_iso
 
 CHANNEL = "Security"
 DEFAULT_POLL_SECONDS = 5
@@ -48,6 +49,7 @@ class SecurityConnector:
         self.tail_buffer: deque[dict] = deque(maxlen=tail_size)
         self.mode = "pywin32" if HAS_PYWIN32 else "powershell"
         self._output_paths = build_output_paths(BASE_OUTPUT_DIR, self.hostname)
+        self.timezone_name = local_timezone_name()
 
     def read_new_events(self, last_record_id: int, max_events: int) -> list[dict]:
         if HAS_PYWIN32:
@@ -71,7 +73,12 @@ class SecurityConnector:
                 xml = win32evtlog.EvtRender(event, win32evtlog.EvtRenderEventXml)
                 parsed = parse_event_xml(xml)
                 if parsed:
-                    events.append(parsed)
+                    observed_utc = parsed.get("time_created_utc") or utc_now_iso()
+                    events.append(
+                        build_security_raw_event(
+                            parsed, observed_utc, self.hostname, self.timezone_name
+                        )
+                    )
         return events
 
     def _read_new_events_powershell(self, last_record_id: int, max_events: int) -> list[dict]:
@@ -98,7 +105,12 @@ class SecurityConnector:
                 continue
             parsed = parse_event_xml(xml)
             if parsed:
-                events.append(parsed)
+                observed_utc = parsed.get("time_created_utc") or utc_now_iso()
+                events.append(
+                    build_security_raw_event(
+                        parsed, observed_utc, self.hostname, self.timezone_name
+                    )
+                )
         return events
 
     def _raise_access_denied(self, error: object) -> None:
@@ -141,14 +153,14 @@ class SecurityConnector:
                         for event in events:
                             self.tail_buffer.append(event)
                         checkpoint.last_record_id = max(
-                            event["record_id"] for event in events
+                            event["ids"]["record_id"] for event in events
                         )
                         save_checkpoint(CHECKPOINT_PATH, checkpoint)
                         status_state.update(
                             last_record_id=checkpoint.last_record_id,
                             events_written_total=status_state.events_written_total + written,
                             last_batch_count=written,
-                            last_event_time_utc=events[-1].get("time_created_utc"),
+                            last_event_time_utc=events[-1]["event"]["time"]["created_utc"],
                             last_error=None,
                         )
                         log(
@@ -197,6 +209,12 @@ def parse_event_xml(xml: str) -> dict[str, Any] | None:
     provider_node = system.find("e:Provider", ns) if ns else system.find("Provider")
     if provider_node is not None:
         provider = provider_node.attrib.get("Name")
+    activity_id = None
+    correlation_id = None
+    correlation_node = system.find("e:Correlation", ns) if ns else system.find("Correlation")
+    if correlation_node is not None:
+        activity_id = correlation_node.attrib.get("ActivityID")
+        correlation_id = correlation_node.attrib.get("RelatedActivityID")
     channel = (
         system.findtext("e:Channel", namespaces=ns)
         if ns
@@ -223,6 +241,8 @@ def parse_event_xml(xml: str) -> dict[str, Any] | None:
         "record_id": record_id,
         "time_created_utc": time_created,
         "provider": provider,
+        "activity_id": activity_id,
+        "correlation_id": correlation_id,
         "channel": channel,
         "event_id": int(event_id) if event_id else None,
         "level": int(level) if level else None,
