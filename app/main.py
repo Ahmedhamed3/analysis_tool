@@ -716,6 +716,18 @@ async def connectors_status():
     return JSONResponse(connector_manager.status())
 
 
+@app.get("/api/connectors/logs")
+async def connectors_logs(name: str, limit: int = 100):
+    if name not in connector_manager.connector_names():
+        raise HTTPException(status_code=404, detail="Unknown connector name.")
+    return JSONResponse(
+        {
+            "name": name,
+            "lines": connector_manager.logs(name, limit=limit),
+        }
+    )
+
+
 @app.get("/api/sysmon/status")
 async def sysmon_status_proxy():
     return JSONResponse(await _fetch_sysmon_json("/status"))
