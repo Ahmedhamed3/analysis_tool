@@ -51,6 +51,12 @@ Events are appended to daily NDJSON files:
 out/raw/endpoint/windows_sysmon/<hostname>/<YYYY>/<MM>/<DD>/events.ndjson
 ```
 
+Each line is a RawEvent envelope (v1.0). Example:
+
+```json
+{"envelope_version":"1.0","source":{"type":"sysmon","vendor":"microsoft","product":"sysmon","channel":"Microsoft-Windows-Sysmon/Operational","collector":{"name":"sysmon-connector","instance_id":"HOSTNAME:sysmon","host":"HOSTNAME"}},"event":{"time":{"observed_utc":"2024-01-02T03:04:06.000Z","created_utc":"2024-01-02T03:04:05.678Z"},"ids":{"record_id":123,"event_id":1,"activity_id":null,"correlation_id":null,"dedupe_hash":"sha256:ee29a3127270e1471e2bae6a6d7a4d321cbffc4af988544c64aac088ce1b0acf"},"host":{"hostname":"HOSTNAME","os":"windows","timezone":"UTC+0000"},"severity":"information","tags":["live","sysmon"]},"raw":{"format":"xml","data":"<Event>...</Event>","rendered_message":null}}
+```
+
 Checkpoint state is stored at:
 
 ```
