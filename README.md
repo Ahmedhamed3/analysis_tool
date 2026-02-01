@@ -54,7 +54,7 @@ out/raw/endpoint/windows_sysmon/<hostname>/<YYYY>/<MM>/<DD>/events.ndjson
 Each line is a RawEvent envelope (v1.0). Example:
 
 ```json
-{"envelope_version":"1.0","source":{"type":"sysmon","vendor":"microsoft","product":"sysmon","channel":"Microsoft-Windows-Sysmon/Operational","collector":{"name":"sysmon-connector","instance_id":"HOSTNAME:sysmon","host":"HOSTNAME"}},"event":{"time":{"observed_utc":"2024-01-02T03:04:06.000Z","created_utc":"2024-01-02T03:04:05.678Z"},"ids":{"record_id":123,"event_id":1,"activity_id":null,"correlation_id":null,"dedupe_hash":"sha256:ee29a3127270e1471e2bae6a6d7a4d321cbffc4af988544c64aac088ce1b0acf"},"host":{"hostname":"HOSTNAME","os":"windows","timezone":"UTC+0000"},"severity":"information","tags":["live","sysmon"]},"raw":{"format":"xml","data":"<Event>...</Event>","rendered_message":null}}
+{"envelope_version":"1.0","source":{"type":"sysmon","vendor":"microsoft","product":"sysmon","channel":"Microsoft-Windows-Sysmon/Operational","collector":{"name":"sysmon-connector","instance_id":"HOSTNAME:sysmon","host":"HOSTNAME"}},"event":{"time":{"observed_utc":"2024-01-02T03:04:06.000Z","created_utc":"2024-01-02T03:04:05.678Z"}},"ids":{"record_id":123,"event_id":1,"activity_id":null,"correlation_id":null,"dedupe_hash":"sha256:ee29a3127270e1471e2bae6a6d7a4d321cbffc4af988544c64aac088ce1b0acf"},"host":{"hostname":"HOSTNAME","os":"windows","timezone":"UTC+0000"},"severity":"information","tags":["live","sysmon"],"raw":{"format":"xml","data":"<Event>...</Event>","rendered_message":null,"xml":"<Event>...</Event>"}}
 ```
 
 Checkpoint state is stored at:
@@ -79,6 +79,35 @@ The next run will re-export from the current log start (no duplicates beyond the
 GET http://127.0.0.1:<port>/status
 GET http://127.0.0.1:<port>/tail?limit=20
 ```
+
+### Phase 1 verification checklist
+
+**Completeness check with `wevtutil`**
+
+1) Capture the latest Sysmon RecordId from the event log:
+   ```bash
+   wevtutil qe Microsoft-Windows-Sysmon/Operational /f:xml /c:1 /rd:true
+   ```
+2) Compare the `EventRecordID` in the XML output to the latest `ids.record_id` value in the
+   most recent NDJSON line. Confirm `raw.xml` contains the same XML payload.
+
+**Restart safety test**
+
+1) Start the connector and let it ingest for a few cycles.
+2) Kill the process mid-run (e.g., Ctrl+C or Task Manager).
+3) Restart the connector and confirm:
+   - `ids.record_id` continues to increase monotonically.
+   - No gaps appear in the NDJSON file for the inspected window.
+   - Duplicate records are only skipped when `ids.dedupe_hash` matches exactly.
+
+**Hash determinism test**
+
+1) Pick a single NDJSON line and extract `raw.xml`, `ids.record_id`, and `ids.event_id`.
+2) Recompute the dedupe hash with:
+   ```text
+   sha256(hostname|Microsoft-Windows-Sysmon/Operational|record_id|event_id|created_utc)
+   ```
+3) Confirm it matches `ids.dedupe_hash`.
 
 ## Windows Security Direct Endpoint Connector
 

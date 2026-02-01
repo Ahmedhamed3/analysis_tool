@@ -28,15 +28,16 @@ def test_raw_event_envelope_shape() -> None:
     assert envelope["source"]["type"] == "sysmon"
     assert envelope["source"]["collector"]["instance_id"] == "EXAMPLE:sysmon"
     event = envelope["event"]
-    assert event["ids"]["record_id"] == 123
-    assert event["ids"]["event_id"] == 1
+    assert envelope["ids"]["record_id"] == 123
+    assert envelope["ids"]["event_id"] == 1
     assert event["time"]["created_utc"] == "2024-01-02T03:04:05.678Z"
-    assert event["severity"] == "information"
-    assert event["host"]["hostname"] == "EXAMPLE"
-    assert event["host"]["os"] == "windows"
-    assert re.match(r"^UTC[+-]\d{4}$", event["host"]["timezone"])
+    assert envelope["severity"] == "information"
+    assert envelope["host"]["hostname"] == "EXAMPLE"
+    assert envelope["host"]["os"] == "windows"
+    assert re.match(r"^UTC[+-]\d{4}$", envelope["host"]["timezone"])
     assert envelope["raw"]["format"] == "xml"
     assert envelope["raw"]["data"] == SAMPLE_XML
+    assert envelope["raw"]["xml"] == SAMPLE_XML
 
 
 def test_dedupe_hash_is_deterministic() -> None:

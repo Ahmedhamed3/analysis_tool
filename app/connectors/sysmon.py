@@ -9,10 +9,12 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
 from app.utils.checkpoint import Checkpoint, load_checkpoint, save_checkpoint
+from app.utils.dedupe_cache import DedupeCache, load_dedupe_cache, save_dedupe_cache
 from app.utils.http_status import HttpStatusServer, StatusState, tail_ndjson
 from app.utils.ndjson_writer import append_ndjson
 from app.utils.pathing import build_output_paths
@@ -49,6 +51,8 @@ class SysmonConnector:
         self.tail_buffer: deque[dict] = deque(maxlen=tail_size)
         self.mode = "pywin32" if HAS_PYWIN32 else "powershell"
         self._output_paths = build_output_paths(BASE_OUTPUT_DIR, self.hostname)
+        self._dedupe_cache_path: Path | None = None
+        self._dedupe_cache: DedupeCache | None = None
 
     def read_new_events(self, last_record_id: int, max_events: int) -> list[dict]:
         if HAS_PYWIN32:
@@ -123,19 +127,14 @@ class SysmonConnector:
                 try:
                     events = self.read_new_events(checkpoint.last_record_id, max_events)
                     if events:
-                        output_path = self._output_paths.daily_events_path()
-                        written = append_ndjson(output_path, events)
-                        for event in events:
-                            self.tail_buffer.append(event)
-                        checkpoint.last_record_id = max(
-                            event["event"]["ids"]["record_id"] for event in events
+                        written, last_event_time_utc = self._write_events(
+                            events, checkpoint
                         )
-                        save_checkpoint(CHECKPOINT_PATH, checkpoint)
                         status_state.update(
                             last_record_id=checkpoint.last_record_id,
                             events_written_total=status_state.events_written_total + written,
                             last_batch_count=written,
-                            last_event_time_utc=events[-1]["event"]["time"]["created_utc"],
+                            last_event_time_utc=last_event_time_utc,
                             last_error=None,
                         )
                         log(
@@ -154,6 +153,48 @@ class SysmonConnector:
         finally:
             if http_server:
                 http_server.stop()
+
+    def _write_events(self, events: list[dict], checkpoint: Checkpoint) -> tuple[int, str]:
+        output_path = self._output_paths.daily_events_path()
+        cache = self._ensure_dedupe_cache(output_path)
+        deduped_events = self._apply_dedupe(events, cache)
+        written = append_ndjson(output_path, deduped_events)
+        self._persist_dedupe_cache(cache)
+        for event in deduped_events:
+            self.tail_buffer.append(event)
+        checkpoint.last_record_id = max(event["ids"]["record_id"] for event in events)
+        save_checkpoint(CHECKPOINT_PATH, checkpoint)
+        return written, events[-1]["event"]["time"]["created_utc"]
+
+    def _ensure_dedupe_cache(self, output_path: Path) -> DedupeCache:
+        dedupe_path = output_path.with_suffix(".dedupe.json")
+        if self._dedupe_cache_path != dedupe_path:
+            self._dedupe_cache_path = dedupe_path
+            self._dedupe_cache = load_dedupe_cache(dedupe_path, warn=log)
+        if self._dedupe_cache is None:
+            self._dedupe_cache = DedupeCache.empty(10_000)
+        return self._dedupe_cache
+
+    def _persist_dedupe_cache(self, cache: DedupeCache) -> None:
+        if not self._dedupe_cache_path:
+            return
+        try:
+            save_dedupe_cache(self._dedupe_cache_path, cache)
+        except OSError as exc:
+            log(f"Failed to save dedupe cache {self._dedupe_cache_path}: {exc}")
+
+    def _apply_dedupe(self, events: list[dict], cache: DedupeCache) -> list[dict]:
+        deduped: list[dict] = []
+        for event in events:
+            dedupe_hash = event.get("ids", {}).get("dedupe_hash")
+            if not dedupe_hash:
+                deduped.append(event)
+                continue
+            if dedupe_hash in cache:
+                continue
+            cache.add(dedupe_hash)
+            deduped.append(event)
+        return deduped
 
 
 def parse_event_xml(xml: str, hostname: str) -> dict[str, Any] | None:
@@ -204,26 +245,27 @@ def parse_event_xml(xml: str, hostname: str) -> dict[str, Any] | None:
             "time": {
                 "observed_utc": utc_now_iso(),
                 "created_utc": time_created,
-            },
-            "ids": {
-                "record_id": record_id,
-                "event_id": event_id,
-                "activity_id": None,
-                "correlation_id": None,
-                "dedupe_hash": dedupe_hash,
-            },
-            "host": {
-                "hostname": hostname,
-                "os": "windows",
-                "timezone": timezone_name,
-            },
-            "severity": severity,
-            "tags": ["live", "sysmon"],
+            }
         },
+        "ids": {
+            "record_id": record_id,
+            "event_id": event_id,
+            "activity_id": None,
+            "correlation_id": None,
+            "dedupe_hash": dedupe_hash,
+        },
+        "host": {
+            "hostname": hostname,
+            "os": "windows",
+            "timezone": timezone_name,
+        },
+        "severity": severity,
+        "tags": ["live", "sysmon"],
         "raw": {
             "format": "xml",
             "data": xml,
             "rendered_message": None,
+            "xml": xml,
         },
     }
 
