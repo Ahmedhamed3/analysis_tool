@@ -2,6 +2,12 @@
 
 This project converts multiple evidence sources into OCSF NDJSON using plugins (detect/parse/map/pipeline).
 
+## Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
 ## Webapp connector startup
 
 When you start the FastAPI webapp, it automatically launches the Sysmon and Windows Security
