@@ -75,3 +75,12 @@ def test_pipeline_event_sysmon_eid1(tmp_path: Path, monkeypatch) -> None:
     payload = response.json()
     assert payload["ocsf"] is not None
     assert payload["report"]["schema_valid"] is True
+
+
+def test_pipeline_ui_returns_html() -> None:
+    client = TestClient(main.app)
+
+    response = client.get("/ui/pipeline")
+
+    assert response.status_code == 200
+    assert "Pipeline Viewer" in response.text

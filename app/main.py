@@ -496,6 +496,14 @@ SYS_MON_OCSF_TEMPLATE = Template(
         flex-wrap: wrap;
         margin-bottom: 16px;
       }
+      .empty-state {
+        padding: 12px;
+        background: #fff;
+        border: 1px dashed #cbd2d9;
+        border-radius: 8px;
+        color: #52606d;
+        font-size: 13px;
+      }
       .event-list button {
         border: 1px solid #cbd2d9;
         border-radius: 6px;
@@ -821,6 +829,7 @@ PIPELINE_UI_TEMPLATE = Template(
         eventList.innerHTML = "";
         if (!items.length) {
           statusLabel.textContent = "No events found.";
+          eventList.innerHTML = "<div class=\\"empty-state\\">No events yet. Try refreshing or adjusting the source.</div>";
           clearPanels("No data.");
           return;
         }
@@ -1520,7 +1529,7 @@ async def sysmon_ocsf_ui(limit: int = 20):
 @app.get("/ui/pipeline")
 async def pipeline_ui(limit: int = 20):
     safe_limit = max(1, min(limit, 200))
-    return HTMLResponse(PIPELINE_UI_TEMPLATE.substitute(limit=safe_limit))
+    return HTMLResponse(PIPELINE_UI_TEMPLATE.safe_substitute(limit=safe_limit))
 
 
 @app.get("/api/ocsf/sysmon/events")
