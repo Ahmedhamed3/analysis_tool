@@ -190,6 +190,12 @@ Events are appended to daily NDJSON files:
 out/raw/siem/elastic/local/<index>/<YYYY>/<MM>/<DD>/events.ndjson
 ```
 
+Elastic connector output is RawEvent v1 envelopes (one JSON object per line). Example:
+
+```json
+{"envelope_version":"1.0","source":{"type":"elastic","vendor":"elastic","product":"elastic-stack"},"event":{"time":{"observed_utc":"2024-04-01T12:34:56.789Z","created_utc":"2024-04-01T12:35:00Z"}},"raw":{"format":"json","data":{"_index":"logs-test-default","_id":"abc123","_source":{"@timestamp":"2024-04-01T12:34:56.789Z","message":"Example"}}}}
+```
+
 Checkpoint state is stored at:
 
 ```

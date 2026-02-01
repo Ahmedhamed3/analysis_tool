@@ -593,10 +593,18 @@ def _extract_tail_items(payload: Any) -> List[Any]:
     return []
 
 
-def _wrap_tail_payload(source_key: str, payload: Any, limit: int | None = None) -> Dict[str, Any]:
+def _wrap_tail_payload(
+    source_key: str,
+    payload: Any,
+    limit: int | None = None,
+    *,
+    wrap_items: bool = True,
+) -> Dict[str, Any]:
     items = _extract_tail_items(payload)
     if limit is not None:
         items = items[-limit:]
+    if not wrap_items:
+        return {"items": items}
     return {"items": [_coerce_envelope_item(source_key, item) for item in items]}
 
 
@@ -938,7 +946,7 @@ async def elastic_status_proxy():
 async def elastic_tail_proxy(limit: int = 20):
     safe_limit = max(1, min(limit, 1000))
     payload = await _fetch_elastic_json("/tail", {"limit": safe_limit})
-    return JSONResponse(_wrap_tail_payload("elastic", payload, safe_limit))
+    return JSONResponse(_wrap_tail_payload("elastic", payload, safe_limit, wrap_items=False))
 
 
 @app.post("/convert/sysmon")

@@ -4,6 +4,7 @@ import argparse
 import base64
 import json
 import os
+import socket
 import sys
 import time
 import urllib.error
@@ -18,6 +19,7 @@ from app.utils.checkpoint import ElasticCheckpoint, load_elastic_checkpoint, sav
 from app.utils.http_status import HttpStatusServer, tail_ndjson
 from app.utils.ndjson_writer import append_ndjson
 from app.utils.pathing import build_elastic_output_path
+from app.utils.raw_envelope import build_elastic_raw_event, local_timezone_name
 from app.utils.timeutil import to_utc_iso, utc_now_iso
 
 DEFAULT_POLL_SECONDS = 10
@@ -92,6 +94,8 @@ class ElasticConnector:
         self.username = username
         self.password = password
         self.start_ago_seconds = start_ago_seconds
+        self.hostname = socket.gethostname()
+        self.timezone_name = local_timezone_name()
         self.tail_buffer: deque[dict] = deque(maxlen=tail_size)
 
     def run_forever(self, poll_seconds: int, max_events: int, http_port: int | None) -> None:
@@ -292,26 +296,32 @@ class ElasticConnector:
 
     def _format_records(self, hits: Iterable[dict]) -> Iterable[dict]:
         for hit in hits:
-            source = hit.get("_source") or {}
-            timestamp = to_utc_iso(source.get("@timestamp"))
-            record = {
-                "source_type": "elastic",
-                "es_url": self.es_url,
-                "index": hit.get("_index"),
-                "doc_id": hit.get("_id"),
-                "time_created_utc": timestamp,
-                "raw_source": source,
-                "raw_hit": hit,
-            }
-            yield record
+            now_utc = utc_now_iso()
+            yield build_elastic_raw_event(
+                hit,
+                now_utc=now_utc,
+                hostname=self.hostname,
+                timezone_name=self.timezone_name,
+            )
 
     def _write_records(self, records: Iterable[dict]) -> int:
         grouped: dict[Path, list[dict]] = defaultdict(list)
         for record in records:
-            time_created = record.get("time_created_utc")
-            when = _parse_timestamp(time_created)
+            event_time = (
+                record.get("event", {})
+                .get("time", {})
+                .get("observed_utc")
+                or record.get("event", {}).get("time", {}).get("created_utc")
+            )
+            when = _parse_timestamp(event_time)
+            index = (
+                record.get("raw", {})
+                .get("data", {})
+                .get("_index")
+                or "unknown"
+            )
             output_path = build_elastic_output_path(
-                BASE_OUTPUT_DIR, str(record.get("index")), when
+                BASE_OUTPUT_DIR, str(index), when
             )
             grouped[output_path].append(record)
         written = 0
