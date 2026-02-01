@@ -127,6 +127,18 @@ Use `record_id` or `dedupe_hash` query params to select a specific event, for ex
 http://127.0.0.1:8000/ui/ocsf/sysmon?record_id=123
 ```
 
+### Unified pipeline UI
+
+Open the end-to-end pipeline UI for the latest raw events across Sysmon, Windows Security,
+and Elastic:
+
+```
+http://127.0.0.1:8000/ui/pipeline
+```
+
+Use the source dropdown, pick a recent event, and review the original payload, RawEvent
+envelope, OCSF (when supported), and the validation/mapping report.
+
 ### Phase 1 verification checklist
 
 **Completeness check with `wevtutil`**

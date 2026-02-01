@@ -17,6 +17,7 @@ from app.conversion import (
     convert_events_with_source_to_ocsf_jsonl,
 )
 from app.connectors.manager import ConnectorManager
+from app.connectors.elastic import tail_elastic_ndjson
 from app.detect import auto_detect_source, summarize_event_detection
 from app.formats.reader import iter_events_from_upload
 from app.plugins.azure_ad_signin.detect import score_events as score_azure_ad_signin
@@ -36,6 +37,7 @@ from app.normalizers.sysmon_to_ocsf.io_ndjson import class_path_for_event
 from app.normalizers.sysmon_to_ocsf.mapper import MappingContext, map_raw_event
 from app.normalizers.sysmon_to_ocsf.report import build_report
 from app.normalizers.sysmon_to_ocsf.validator import OcsfSchemaLoader
+from app.utils.http_status import tail_ndjson
 from app.utils.timeutil import utc_now_iso
 
 app = FastAPI(
@@ -639,6 +641,244 @@ SYS_MON_OCSF_TEMPLATE = Template(
 """
 )
 
+PIPELINE_UI_TEMPLATE = Template(
+    """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pipeline Viewer</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 24px;
+        color: #1f2933;
+        background: #f8f9fb;
+      }
+      .header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 16px;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+      .controls {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      select,
+      input[type="number"] {
+        padding: 6px 10px;
+        border-radius: 6px;
+        border: 1px solid #cbd2d9;
+        background: #fff;
+      }
+      button {
+        border: 1px solid #cbd2d9;
+        border-radius: 6px;
+        background: #fff;
+        padding: 6px 10px;
+        cursor: pointer;
+      }
+      .event-list {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+      .event-list button.active {
+        background: #2563eb;
+        color: #fff;
+        border-color: #2563eb;
+      }
+      .panel-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(280px, 1fr));
+        gap: 16px;
+      }
+      .panel {
+        background: #fff;
+        border: 1px solid #e4e7eb;
+        border-radius: 8px;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        min-height: 320px;
+      }
+      .panel h2 {
+        font-size: 14px;
+        margin: 0 0 8px 0;
+        color: #52606d;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      pre {
+        flex: 1;
+        margin: 0;
+        padding: 12px;
+        background: #0f172a;
+        color: #e2e8f0;
+        border-radius: 6px;
+        overflow: auto;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .status {
+        font-size: 12px;
+        color: #52606d;
+      }
+      @media (max-width: 768px) {
+        .panel-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>Pipeline Viewer</h1>
+      <div class="controls">
+        <label>
+          Source:
+          <select id="sourceSelect">
+            <option value="sysmon" selected>Sysmon</option>
+            <option value="security">Windows Security</option>
+            <option value="elastic">Elastic</option>
+          </select>
+        </label>
+        <label>
+          Latest N:
+          <input id="limitInput" type="number" min="1" max="200" value="$limit" />
+        </label>
+        <button id="refreshButton">Refresh</button>
+        <span class="status" id="statusLabel"></span>
+      </div>
+    </div>
+    <div class="event-list" id="eventList"></div>
+    <div class="panel-grid">
+      <div class="panel">
+        <h2>Original</h2>
+        <pre id="originalPanel">Select an event...</pre>
+      </div>
+      <div class="panel">
+        <h2>Raw Event Envelope</h2>
+        <pre id="rawPanel">Select an event...</pre>
+      </div>
+      <div class="panel">
+        <h2>OCSF JSON</h2>
+        <pre id="ocsfPanel">Select an event...</pre>
+      </div>
+      <div class="panel">
+        <h2>Validation + Mapping Report</h2>
+        <pre id="reportPanel">Select an event...</pre>
+      </div>
+    </div>
+    <script>
+      const sourceSelect = document.getElementById("sourceSelect");
+      const eventList = document.getElementById("eventList");
+      const originalPanel = document.getElementById("originalPanel");
+      const rawPanel = document.getElementById("rawPanel");
+      const ocsfPanel = document.getElementById("ocsfPanel");
+      const reportPanel = document.getElementById("reportPanel");
+      const statusLabel = document.getElementById("statusLabel");
+      const limitInput = document.getElementById("limitInput");
+      const refreshButton = document.getElementById("refreshButton");
+
+      function formatJson(value, fallback = "—") {
+        if (value === null || value === undefined) {
+          return fallback;
+        }
+        if (typeof value === "string") {
+          return value;
+        }
+        return JSON.stringify(value, null, 2);
+      }
+
+      function clearPanels(message) {
+        originalPanel.textContent = message;
+        rawPanel.textContent = message;
+        ocsfPanel.textContent = message;
+        reportPanel.textContent = message;
+      }
+
+      async function loadEvents() {
+        statusLabel.textContent = "Loading…";
+        const source = sourceSelect.value;
+        const limit = limitInput.value || $limit;
+        const response = await fetch(`/api/${source}/tail?limit=${limit}`);
+        if (!response.ok) {
+          statusLabel.textContent = "Failed to load events.";
+          clearPanels("No data.");
+          return;
+        }
+        const data = await response.json();
+        const items = data.items || [];
+        eventList.innerHTML = "";
+        if (!items.length) {
+          statusLabel.textContent = "No events found.";
+          clearPanels("No data.");
+          return;
+        }
+        statusLabel.textContent = "";
+        items.forEach((item) => {
+          const ids = item.ids || {};
+          const recordId = ids.record_id ?? "—";
+          const eventId = ids.event_id ?? "—";
+          const key = ids.dedupe_hash || recordId;
+          const button = document.createElement("button");
+          button.textContent = `Record ${recordId} (EID ${eventId})`;
+          button.dataset.key = key;
+          button.addEventListener("click", () => selectEvent(key));
+          eventList.appendChild(button);
+        });
+        const firstKey = eventList.firstChild?.dataset?.key;
+        if (firstKey) {
+          selectEvent(firstKey);
+        }
+      }
+
+      async function selectEvent(key) {
+        if (!key) {
+          return;
+        }
+        Array.from(eventList.children).forEach((button) => {
+          button.classList.toggle("active", button.dataset.key === key);
+        });
+        const source = sourceSelect.value;
+        const response = await fetch(`/api/pipeline/event?source=${source}&key=${encodeURIComponent(key)}`);
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          const message = error.detail || "Failed to load event.";
+          statusLabel.textContent = message;
+          clearPanels(message);
+          return;
+        }
+        const payload = await response.json();
+        originalPanel.textContent = formatJson(payload.original, "Not available.");
+        rawPanel.textContent = formatJson(payload.raw_envelope, "Not available.");
+        if (payload.ocsf) {
+          ocsfPanel.textContent = formatJson(payload.ocsf, "Not available.");
+        } else {
+          ocsfPanel.textContent = "Not supported yet.";
+        }
+        reportPanel.textContent = formatJson(payload.report, "Not available.");
+      }
+
+      refreshButton.addEventListener("click", loadEvents);
+      sourceSelect.addEventListener("change", loadEvents);
+      limitInput.addEventListener("change", loadEvents);
+      loadEvents();
+    </script>
+  </body>
+</html>
+"""
+)
+
 _OCSF_SCHEMA_LOADER: Optional[OcsfSchemaLoader] = None
 
 
@@ -649,14 +889,17 @@ def _get_ocsf_schema_loader() -> OcsfSchemaLoader:
     return _OCSF_SCHEMA_LOADER
 
 
-def _latest_sysmon_raw_path() -> Optional[Path]:
-    base_dir = Path("out/raw/endpoint/windows_sysmon")
+def _latest_raw_path(base_dir: Path) -> Optional[Path]:
     if not base_dir.exists():
         return None
     candidates = list(base_dir.rglob("events.ndjson"))
     if not candidates:
         return None
     return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _latest_sysmon_raw_path() -> Optional[Path]:
+    return _latest_raw_path(Path("out/raw/endpoint/windows_sysmon"))
 
 
 def _load_sysmon_raw_events(limit: int) -> List[Dict[str, Any]]:
@@ -672,6 +915,21 @@ def _load_sysmon_raw_events(limit: int) -> List[Dict[str, Any]]:
             continue
         events.append(json.loads(line))
     return events
+
+
+def _latest_security_raw_path() -> Optional[Path]:
+    return _latest_raw_path(Path("out/raw/endpoint/windows_security"))
+
+
+def _load_security_raw_events(limit: int) -> List[Dict[str, Any]]:
+    path = _latest_security_raw_path()
+    if path is None:
+        return []
+    return tail_ndjson(path, limit)
+
+
+def _load_elastic_raw_events(limit: int) -> List[Dict[str, Any]]:
+    return tail_elastic_ndjson("out/raw/siem/elastic", limit)
 
 
 def _build_sysmon_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
@@ -699,6 +957,38 @@ def _build_sysmon_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
         "ocsf_event": ocsf_event,
         "report": report,
     }
+
+
+def _build_not_implemented_report(raw_event: Dict[str, Any], source: str) -> Dict[str, Any]:
+    ids = raw_event.get("ids") or {}
+    return {
+        "record_id": ids.get("record_id"),
+        "dedupe_hash": ids.get("dedupe_hash"),
+        "event_id": ids.get("event_id"),
+        "supported": False,
+        "schema_valid": False,
+        "validation_errors": [],
+        "mapped": False,
+        "status": "not_implemented",
+        "message": f"OCSF mapping not implemented for source '{source}'.",
+    }
+
+
+def _extract_original_payload(raw_event: Dict[str, Any], source: str) -> Any:
+    raw = raw_event.get("raw") or {}
+    if source == "sysmon":
+        return raw.get("xml") or raw.get("data")
+    return raw.get("data")
+
+
+def _matches_event_key(raw_event: Dict[str, Any], key: str) -> bool:
+    ids = raw_event.get("ids") or {}
+    if ids.get("dedupe_hash") == key:
+        return True
+    record_id = ids.get("record_id")
+    if record_id is None:
+        return False
+    return str(record_id) == key
 
 
 def _build_source_options(selected_source: str) -> str:
@@ -1227,6 +1517,12 @@ async def sysmon_ocsf_ui(limit: int = 20):
     return HTMLResponse(SYS_MON_OCSF_TEMPLATE.substitute(limit=safe_limit))
 
 
+@app.get("/ui/pipeline")
+async def pipeline_ui(limit: int = 20):
+    safe_limit = max(1, min(limit, 200))
+    return HTMLResponse(PIPELINE_UI_TEMPLATE.substitute(limit=safe_limit))
+
+
 @app.get("/api/ocsf/sysmon/events")
 async def sysmon_ocsf_events(limit: int = 20):
     safe_limit = max(1, min(limit, 200))
@@ -1266,6 +1562,51 @@ async def sysmon_ocsf_event(record_id: Optional[int] = None, dedupe_hash: Option
     if matched is None:
         raise HTTPException(status_code=404, detail="Raw event not found.")
     return JSONResponse(_build_sysmon_ocsf_payload(matched))
+
+
+@app.get("/api/pipeline/event")
+async def pipeline_event(source: str, key: str):
+    source_key = source.strip().lower()
+    if source_key not in {"sysmon", "security", "elastic"}:
+        raise HTTPException(status_code=400, detail="source must be sysmon, security, or elastic.")
+    if not key:
+        raise HTTPException(status_code=400, detail="key is required.")
+    clean_key = key.strip()
+    if source_key == "sysmon":
+        events = _load_sysmon_raw_events(200)
+    elif source_key == "security":
+        events = _load_security_raw_events(200)
+    else:
+        events = _load_elastic_raw_events(200)
+    matched = None
+    for event in events:
+        if _matches_event_key(event, clean_key):
+            matched = event
+            break
+    if matched is None:
+        raise HTTPException(status_code=404, detail="Raw event not found.")
+    original = _extract_original_payload(matched, source_key)
+    if source_key == "sysmon":
+        payload = _build_sysmon_ocsf_payload(matched)
+        return JSONResponse(
+            {
+                "source": source_key,
+                "original": original,
+                "raw_envelope": matched,
+                "ocsf": payload["ocsf_event"],
+                "report": payload["report"],
+            }
+        )
+    report = _build_not_implemented_report(matched, source_key)
+    return JSONResponse(
+        {
+            "source": source_key,
+            "original": original,
+            "raw_envelope": matched,
+            "ocsf": None,
+            "report": report,
+        }
+    )
 
 
 @app.post("/convert/zeek")
