@@ -54,6 +54,55 @@ def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def validate_raw_event_v1(envelope: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if envelope.get("envelope_version") != "1.0":
+        errors.append("envelope_version must be '1.0'")
+    source = envelope.get("source")
+    if not isinstance(source, dict):
+        errors.append("source must be an object")
+    else:
+        for key in ("type", "vendor", "product"):
+            if not source.get(key):
+                errors.append(f"source.{key} is required")
+    event = envelope.get("event")
+    if not isinstance(event, dict):
+        errors.append("event must be an object")
+    else:
+        time_block = event.get("time")
+        if not isinstance(time_block, dict):
+            errors.append("event.time must be an object")
+        else:
+            if not time_block.get("observed_utc"):
+                errors.append("event.time.observed_utc is required")
+            if not time_block.get("created_utc"):
+                errors.append("event.time.created_utc is required")
+    ids = envelope.get("ids")
+    if not isinstance(ids, dict):
+        errors.append("ids must be an object")
+    else:
+        if "dedupe_hash" not in ids or not ids.get("dedupe_hash"):
+            errors.append("ids.dedupe_hash is required")
+    host = envelope.get("host")
+    if not isinstance(host, dict):
+        errors.append("host must be an object")
+    severity = envelope.get("severity")
+    if not isinstance(severity, str) or not severity:
+        errors.append("severity must be a non-empty string")
+    tags = envelope.get("tags")
+    if not isinstance(tags, list):
+        errors.append("tags must be a list")
+    raw = envelope.get("raw")
+    if not isinstance(raw, dict):
+        errors.append("raw must be an object")
+    else:
+        if not raw.get("format"):
+            errors.append("raw.format is required")
+        if "data" not in raw:
+            errors.append("raw.data is required")
+    return errors
+
+
 def compute_elastic_dedupe_hash(
     index: str | None,
     doc_id: str | None,
