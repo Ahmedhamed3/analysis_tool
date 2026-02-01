@@ -80,6 +80,53 @@ GET http://127.0.0.1:<port>/status
 GET http://127.0.0.1:<port>/tail?limit=20
 ```
 
+## Sysmon → OCSF (Phase 2)
+
+Phase 2 produces schema-valid OCSF NDJSON for Sysmon Event IDs 1, 3, and 11 using the
+vendored OCSF schema files in `app/ocsf_schema/`.
+
+### Convert RawEvent NDJSON to OCSF NDJSON
+
+```bash
+python -m app.normalizers.sysmon_to_ocsf.cli \
+  --in out/raw/endpoint/windows_sysmon/<hostname>/<YYYY>/<MM>/<DD>/events.ndjson \
+  --out out/ocsf/endpoint/windows_sysmon/<hostname>/<YYYY>/<MM>/<DD>/events.ndjson \
+  --strict
+```
+
+The converter requires the `jsonschema` package:
+
+```bash
+pip install jsonschema
+```
+
+The converter writes:
+
+- OCSF NDJSON output:
+  `out/ocsf/endpoint/windows_sysmon/<hostname>/<YYYY>/<MM>/<DD>/events.ndjson`
+- Mapping/validation report NDJSON (default):
+  `out/ocsf/endpoint/windows_sysmon/<hostname>/<YYYY>/<MM>/<DD>/events.report.ndjson`
+
+### Schema validation behavior
+
+- Every mapped event is validated against the vendored OCSF JSON schemas (offline).
+- In `--strict` mode, invalid OCSF events are not written, but a report line is still produced.
+- Unsupported Sysmon Event IDs emit a report entry with `status="unsupported"` and no OCSF output.
+
+### Sysmon OCSF UI
+
+Open the local UI page:
+
+```
+http://127.0.0.1:8000/ui/ocsf/sysmon
+```
+
+Use `record_id` or `dedupe_hash` query params to select a specific event, for example:
+
+```
+http://127.0.0.1:8000/ui/ocsf/sysmon?record_id=123
+```
+
 ### Phase 1 verification checklist
 
 **Completeness check with `wevtutil`**

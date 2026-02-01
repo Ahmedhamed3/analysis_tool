@@ -2,6 +2,7 @@ import asyncio
 import json
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from html import escape
 from string import Template
 from typing import Any, Dict, List, Optional
@@ -31,6 +32,10 @@ from app.ui.highlight import (
     extract_values,
     highlight_json_text,
 )
+from app.normalizers.sysmon_to_ocsf.io_ndjson import class_path_for_event
+from app.normalizers.sysmon_to_ocsf.mapper import MappingContext, map_raw_event
+from app.normalizers.sysmon_to_ocsf.report import build_report
+from app.normalizers.sysmon_to_ocsf.validator import OcsfSchemaLoader
 from app.utils.timeutil import utc_now_iso
 
 app = FastAPI(
@@ -456,6 +461,244 @@ HTML_PAGE_TEMPLATE = Template(
 </html>
 """
 )
+
+SYS_MON_OCSF_TEMPLATE = Template(
+    """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sysmon → OCSF (Phase 2)</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        margin: 24px;
+        color: #1f2933;
+        background: #f8f9fb;
+      }
+      .header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+      .controls {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .event-list {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+      }
+      .event-list button {
+        border: 1px solid #cbd2d9;
+        border-radius: 6px;
+        background: #fff;
+        padding: 6px 10px;
+        cursor: pointer;
+      }
+      .event-list button.active {
+        background: #2563eb;
+        color: #fff;
+        border-color: #2563eb;
+      }
+      .panel-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 16px;
+      }
+      .panel {
+        background: #fff;
+        border: 1px solid #e4e7eb;
+        border-radius: 8px;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        min-height: 360px;
+      }
+      .panel h2 {
+        font-size: 14px;
+        margin: 0 0 8px 0;
+        color: #52606d;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      pre {
+        flex: 1;
+        margin: 0;
+        padding: 12px;
+        background: #0f172a;
+        color: #e2e8f0;
+        border-radius: 6px;
+        overflow: auto;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .status {
+        font-size: 12px;
+        color: #52606d;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1>Sysmon → OCSF (Phase 2)</h1>
+      <div class="controls">
+        <label>
+          Latest events:
+          <input id="limitInput" type="number" min="1" max="200" value="$limit" />
+        </label>
+        <button id="refreshButton">Refresh</button>
+        <span class="status" id="statusLabel"></span>
+      </div>
+    </div>
+    <div class="event-list" id="eventList"></div>
+    <div class="panel-grid">
+      <div class="panel">
+        <h2>RawEvent JSON</h2>
+        <pre id="rawPanel">Select an event...</pre>
+      </div>
+      <div class="panel">
+        <h2>OCSF JSON</h2>
+        <pre id="ocsfPanel">Select an event...</pre>
+      </div>
+      <div class="panel">
+        <h2>Validation + Mapping Report</h2>
+        <pre id="reportPanel">Select an event...</pre>
+      </div>
+    </div>
+    <script>
+      const eventList = document.getElementById("eventList");
+      const rawPanel = document.getElementById("rawPanel");
+      const ocsfPanel = document.getElementById("ocsfPanel");
+      const reportPanel = document.getElementById("reportPanel");
+      const statusLabel = document.getElementById("statusLabel");
+      const limitInput = document.getElementById("limitInput");
+      const refreshButton = document.getElementById("refreshButton");
+
+      function formatJson(value) {
+        if (!value) {
+          return "—";
+        }
+        return JSON.stringify(value, null, 2);
+      }
+
+      async function loadEvents() {
+        statusLabel.textContent = "Loading…";
+        const limit = limitInput.value || $limit;
+        const response = await fetch("/api/ocsf/sysmon/events?limit=" + limit);
+        const data = await response.json();
+        eventList.innerHTML = "";
+        if (!data.events.length) {
+          statusLabel.textContent = data.message || "No raw events found.";
+          return;
+        }
+        statusLabel.textContent = data.message || "";
+        data.events.forEach((item) => {
+          const button = document.createElement("button");
+          button.textContent = "Record " + item.record_id + " (EID " + item.event_id + ")";
+          button.dataset.recordId = item.record_id;
+          button.dataset.dedupeHash = item.dedupe_hash;
+          button.addEventListener("click", () => selectEvent(button.dataset.recordId, button.dataset.dedupeHash));
+          eventList.appendChild(button);
+        });
+        const params = new URLSearchParams(window.location.search);
+        const recordId = params.get("record_id");
+        const dedupeHash = params.get("dedupe_hash");
+        if (recordId || dedupeHash) {
+          await selectEvent(recordId, dedupeHash);
+        }
+      }
+
+      async function selectEvent(recordId, dedupeHash) {
+        if (!recordId && !dedupeHash) return;
+        Array.from(eventList.children).forEach((button) => {
+          button.classList.toggle("active", button.dataset.recordId === recordId);
+        });
+        const query = new URLSearchParams();
+        if (recordId) query.set("record_id", recordId);
+        if (dedupeHash) query.set("dedupe_hash", dedupeHash);
+        const response = await fetch("/api/ocsf/sysmon/event?" + query.toString());
+        const payload = await response.json();
+        rawPanel.textContent = formatJson(payload.raw_event);
+        ocsfPanel.textContent = formatJson(payload.ocsf_event);
+        reportPanel.textContent = formatJson(payload.report);
+      }
+
+      refreshButton.addEventListener("click", () => loadEvents());
+      loadEvents();
+    </script>
+  </body>
+</html>
+"""
+)
+
+_OCSF_SCHEMA_LOADER: Optional[OcsfSchemaLoader] = None
+
+
+def _get_ocsf_schema_loader() -> OcsfSchemaLoader:
+    global _OCSF_SCHEMA_LOADER
+    if _OCSF_SCHEMA_LOADER is None:
+        _OCSF_SCHEMA_LOADER = OcsfSchemaLoader(Path("app/ocsf_schema"))
+    return _OCSF_SCHEMA_LOADER
+
+
+def _latest_sysmon_raw_path() -> Optional[Path]:
+    base_dir = Path("out/raw/endpoint/windows_sysmon")
+    if not base_dir.exists():
+        return None
+    candidates = list(base_dir.rglob("events.ndjson"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _load_sysmon_raw_events(limit: int) -> List[Dict[str, Any]]:
+    path = _latest_sysmon_raw_path()
+    if path is None:
+        return []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    selected = lines[-limit:] if limit else lines
+    events = []
+    for line in selected:
+        line = line.strip()
+        if not line:
+            continue
+        events.append(json.loads(line))
+    return events
+
+
+def _build_sysmon_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
+    schema_loader = _get_ocsf_schema_loader()
+    context = MappingContext(ocsf_version=schema_loader.version)
+    ocsf_event = map_raw_event(raw_event, context)
+    supported = ocsf_event is not None
+    validation_errors: List[str] = []
+    if supported and ocsf_event is not None:
+        class_path = class_path_for_event(ocsf_event)
+        if class_path:
+            validation = schema_loader.validate_event(ocsf_event, class_path)
+            validation_errors = validation.errors
+        else:
+            supported = False
+            ocsf_event = None
+    report = build_report(
+        raw_event=raw_event,
+        ocsf_event=ocsf_event,
+        supported=supported,
+        validation_errors=validation_errors,
+    )
+    return {
+        "raw_event": raw_event,
+        "ocsf_event": ocsf_event,
+        "report": report,
+    }
 
 
 def _build_source_options(selected_source: str) -> str:
@@ -976,6 +1219,53 @@ async def convert_sysmon_preview(file: UploadFile = File(...)):
         unified_lines=unified_lines,
         detection=detection,
     )
+
+
+@app.get("/ui/ocsf/sysmon")
+async def sysmon_ocsf_ui(limit: int = 20):
+    safe_limit = max(1, min(limit, 200))
+    return HTMLResponse(SYS_MON_OCSF_TEMPLATE.substitute(limit=safe_limit))
+
+
+@app.get("/api/ocsf/sysmon/events")
+async def sysmon_ocsf_events(limit: int = 20):
+    safe_limit = max(1, min(limit, 200))
+    events = _load_sysmon_raw_events(safe_limit)
+    payload = []
+    for event in events:
+        ids = event.get("ids") or {}
+        time_info = (event.get("event") or {}).get("time") or {}
+        payload.append(
+            {
+                "record_id": ids.get("record_id"),
+                "dedupe_hash": ids.get("dedupe_hash"),
+                "event_id": ids.get("event_id"),
+                "time": time_info.get("created_utc") or time_info.get("observed_utc"),
+            }
+        )
+    message = None
+    if not payload:
+        message = "No raw events found."
+    return JSONResponse({"events": payload, "message": message})
+
+
+@app.get("/api/ocsf/sysmon/event")
+async def sysmon_ocsf_event(record_id: Optional[int] = None, dedupe_hash: Optional[str] = None):
+    if record_id is None and not dedupe_hash:
+        raise HTTPException(status_code=400, detail="record_id or dedupe_hash is required.")
+    events = _load_sysmon_raw_events(200)
+    matched = None
+    for event in events:
+        ids = event.get("ids") or {}
+        if record_id is not None and ids.get("record_id") == record_id:
+            matched = event
+            break
+        if dedupe_hash and ids.get("dedupe_hash") == dedupe_hash:
+            matched = event
+            break
+    if matched is None:
+        raise HTTPException(status_code=404, detail="Raw event not found.")
+    return JSONResponse(_build_sysmon_ocsf_payload(matched))
 
 
 @app.post("/convert/zeek")

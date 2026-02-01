@@ -1,0 +1,29 @@
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+
+def build_report(
+    *,
+    raw_event: Dict[str, Any],
+    ocsf_event: Optional[Dict[str, Any]],
+    supported: bool,
+    validation_errors: List[str],
+) -> Dict[str, Any]:
+    ids = raw_event.get("ids") or {}
+    report = {
+        "record_id": ids.get("record_id"),
+        "dedupe_hash": ids.get("dedupe_hash"),
+        "event_id": ids.get("event_id"),
+        "supported": supported,
+        "schema_valid": not validation_errors if supported else False,
+        "validation_errors": validation_errors,
+        "mapped": ocsf_event is not None,
+    }
+    if not supported:
+        report["status"] = "unsupported"
+    elif validation_errors:
+        report["status"] = "invalid"
+    else:
+        report["status"] = "valid"
+    return report
