@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.normalizers.sysmon_to_ocsf.io_ndjson import class_path_for_event
+from app.normalizers.sysmon_to_ocsf.io_ndjson import class_path_for_event, convert_events
 from app.normalizers.sysmon_to_ocsf.mapper import MappingContext, map_raw_event
 from app.normalizers.sysmon_to_ocsf.validator import OcsfSchemaLoader
 
@@ -42,6 +42,7 @@ SYSmon_EID3_XML = """<Event xmlns="http://schemas.microsoft.com/win/2004/08/even
     <Computer>HOST-A</Computer>
   </System>
   <EventData>
+    <Data Name="UtcTime">2024-01-02 03:05:05.678</Data>
     <Data Name="ProcessId">4321</Data>
     <Data Name="ProcessGuid">{33333333-3333-3333-3333-333333333333}</Data>
     <Data Name="Image">C:\\Windows\\System32\\svchost.exe</Data>
@@ -51,6 +52,7 @@ SYSmon_EID3_XML = """<Event xmlns="http://schemas.microsoft.com/win/2004/08/even
     <Data Name="DestinationIp">10.0.0.20</Data>
     <Data Name="DestinationPort">443</Data>
     <Data Name="Protocol">tcp</Data>
+    <Data Name="Initiated">true</Data>
   </EventData>
 </Event>"""
 
@@ -186,6 +188,52 @@ def test_sysmon_event5_mapping_is_deterministic() -> None:
     schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
     context = MappingContext(ocsf_version=schema_loader.version)
     raw_event = build_raw_event(SYSmon_EID5_XML, 5, 126, "sha256:four")
+    mapped_first = map_raw_event(raw_event, context)
+    mapped_second = map_raw_event(raw_event, context)
+    assert mapped_first == mapped_second
+
+
+def test_sysmon_event3_mapping_report_valid() -> None:
+    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
+    raw_event = build_raw_event(SYSmon_EID3_XML, 3, 124, "sha256:two")
+    results = list(convert_events([raw_event], schema_loader=schema_loader, strict=False))
+    assert len(results) == 1
+    mapped, report = results[0]
+    assert mapped is not None
+    assert report["supported"] is True
+    assert report["mapped"] is True
+    assert report["schema_valid"] is True
+    assert report["status"] == "valid"
+    assert mapped["actor"]["user"]["name"] == "svc"
+    assert mapped["actor"]["process"]["pid"] == 4321
+    assert mapped["actor"]["process"]["path"] == "C:\\Windows\\System32\\svchost.exe"
+    assert mapped["connection_info"]["protocol_name"] == "tcp"
+    assert mapped["src_endpoint"]["ip"] == "10.0.0.10"
+    assert mapped["src_endpoint"]["port"] == 50000
+    assert mapped["dst_endpoint"]["ip"] == "10.0.0.20"
+    assert mapped["dst_endpoint"]["port"] == 443
+
+
+def test_sysmon_event3_missing_fields_unmapped() -> None:
+    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
+    xml_payload = SYSmon_EID3_XML.replace(
+        '<Data Name="DestinationIp">10.0.0.20</Data>',
+        "",
+    )
+    raw_event = build_raw_event(xml_payload, 3, 129, "sha256:seven")
+    results = list(convert_events([raw_event], schema_loader=schema_loader, strict=False))
+    mapped, report = results[0]
+    assert mapped is None
+    assert report["supported"] is True
+    assert report["mapped"] is False
+    assert report["status"] == "unmapped"
+    assert "DestinationIp" in report["missing_fields"]
+
+
+def test_sysmon_event3_mapping_is_deterministic() -> None:
+    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
+    context = MappingContext(ocsf_version=schema_loader.version)
+    raw_event = build_raw_event(SYSmon_EID3_XML, 3, 124, "sha256:two")
     mapped_first = map_raw_event(raw_event, context)
     mapped_second = map_raw_event(raw_event, context)
     assert mapped_first == mapped_second

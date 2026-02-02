@@ -34,7 +34,7 @@ from app.ui.highlight import (
     highlight_json_text,
 )
 from app.normalizers.sysmon_to_ocsf.io_ndjson import class_path_for_event
-from app.normalizers.sysmon_to_ocsf.mapper import MappingContext, map_raw_event
+from app.normalizers.sysmon_to_ocsf.mapper import MappingContext, map_raw_event, mapping_attempted, missing_required_fields
 from app.normalizers.sysmon_to_ocsf.report import build_report
 from app.normalizers.sysmon_to_ocsf.validator import OcsfSchemaLoader
 from app.normalizers.windows_security_to_ocsf.io_ndjson import (
@@ -958,7 +958,9 @@ def _build_sysmon_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
     schema_loader = _get_ocsf_schema_loader()
     context = MappingContext(ocsf_version=schema_loader.version)
     ocsf_event = map_raw_event(raw_event, context)
-    supported = ocsf_event is not None
+    attempted = mapping_attempted(raw_event)
+    supported = attempted
+    missing_fields = missing_required_fields(raw_event)
     validation_errors: List[str] = []
     if supported and ocsf_event is not None:
         class_path = class_path_for_event(ocsf_event)
@@ -968,11 +970,15 @@ def _build_sysmon_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
         else:
             supported = False
             ocsf_event = None
+    elif not attempted:
+        supported = False
     report = build_report(
         raw_event=raw_event,
         ocsf_event=ocsf_event,
         supported=supported,
         validation_errors=validation_errors,
+        mapping_attempted=attempted,
+        missing_fields=missing_fields,
     )
     return {
         "raw_event": raw_event,

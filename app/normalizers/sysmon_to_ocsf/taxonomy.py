@@ -12,6 +12,7 @@ FILE_ACTIVITY_CREATE_ID = 1
 
 DEVICE_TYPE_UNKNOWN_ID = 0
 FILE_TYPE_UNKNOWN_ID = 0
+NETWORK_DIRECTION_UNKNOWN_ID = 0
 
 
 def to_class_uid(category_uid: int, class_uid: int) -> int:
