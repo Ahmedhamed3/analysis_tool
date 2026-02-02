@@ -66,6 +66,8 @@ def class_path_for_event(event: Dict[str, Any]) -> Optional[str]:
         return "base_event"
     if class_uid == 3002:
         return "iam/authentication"
+    if class_uid == 3003:
+        return "iam/authorize_session"
     if class_uid == 1007:
         return "system/process_activity"
     if class_uid == 4001:

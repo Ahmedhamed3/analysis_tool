@@ -111,6 +111,54 @@ def test_elastic_process_mapping_schema_valid() -> None:
     assert result.valid, result.errors
 
 
+def test_elastic_windows_security_4673_mapping_schema_valid() -> None:
+    hit = {
+        "_index": "logs-windows.security-default",
+        "_id": "winsec-4673",
+        "_source": {
+            "@timestamp": "2024-06-01T11:54:00Z",
+            "event": {
+                "category": ["authentication"],
+                "code": "4673",
+            },
+            "winlog": {
+                "channel": "Security",
+                "event_data": {
+                    "PrivilegeList": "SeBackupPrivilege SeRestorePrivilege",
+                    "SubjectLogonId": "0x3e7",
+                },
+            },
+            "user": {"name": "svc-backup", "id": "S-1-5-21-1000"},
+            "process": {
+                "pid": 4242,
+                "name": "backup.exe",
+                "executable": "C:\\Windows\\System32\\backup.exe",
+            },
+            "host": {"name": "win-host-01"},
+        },
+    }
+    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
+    context = MappingContext(ocsf_version=schema_loader.version)
+    raw_event = build_raw_event(hit)
+
+    mapped = map_raw_event(raw_event, context)
+
+    assert mapped is not None
+    assert mapped["class_uid"] == 3003
+    assert mapped["category_uid"] == 3
+    assert mapped["activity_id"] == 1
+    assert mapped["type_uid"] == 300301
+    class_path = class_path_for_event(mapped)
+    assert class_path == "iam/authorize_session"
+    assert "dst_endpoint" not in mapped
+    assert mapped["actor"]["process"]["pid"] == 4242
+    assert mapped["actor"]["process"]["name"] == "backup.exe"
+    assert mapped["actor"]["process"]["path"] == "C:\\Windows\\System32\\backup.exe"
+    assert mapped["unmapped"]["elastic"]["_source"] == hit["_source"]
+    result = schema_loader.validate_event(mapped, class_path)
+    assert result.valid, result.errors
+
+
 def test_elastic_generic_mapping_schema_valid() -> None:
     hit = {
         "_index": "logs-generic-default",
