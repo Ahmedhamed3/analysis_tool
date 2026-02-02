@@ -33,8 +33,22 @@ from app.ui.highlight import (
     extract_values,
     highlight_json_text,
 )
+from app.normalizers.elastic_to_ocsf.io_ndjson import (
+    class_path_for_event as elastic_class_path_for_event,
+)
+from app.normalizers.elastic_to_ocsf.mapper import (
+    MappingContext as ElasticMappingContext,
+    map_raw_event as map_elastic_raw_event,
+    mapping_attempted as elastic_mapping_attempted,
+    missing_required_fields as elastic_missing_required_fields,
+)
 from app.normalizers.sysmon_to_ocsf.io_ndjson import class_path_for_event
-from app.normalizers.sysmon_to_ocsf.mapper import MappingContext, map_raw_event, mapping_attempted, missing_required_fields
+from app.normalizers.sysmon_to_ocsf.mapper import (
+    MappingContext,
+    map_raw_event,
+    mapping_attempted,
+    missing_required_fields,
+)
 from app.normalizers.sysmon_to_ocsf.report import build_report
 from app.normalizers.sysmon_to_ocsf.validator import OcsfSchemaLoader
 from app.normalizers.windows_security_to_ocsf.io_ndjson import (
@@ -1018,6 +1032,37 @@ def _build_security_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _build_elastic_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
+    schema_loader = _get_ocsf_schema_loader()
+    context = ElasticMappingContext(ocsf_version=schema_loader.version)
+    ocsf_event = map_elastic_raw_event(raw_event, context)
+    attempted = elastic_mapping_attempted(raw_event)
+    supported = attempted
+    missing_fields = elastic_missing_required_fields(raw_event)
+    validation_errors: List[str] = []
+    if supported and ocsf_event is not None:
+        class_path = elastic_class_path_for_event(ocsf_event)
+        if class_path:
+            validation = schema_loader.validate_event(ocsf_event, class_path)
+            validation_errors = validation.errors
+        else:
+            supported = False
+            ocsf_event = None
+    report = build_report(
+        raw_event=raw_event,
+        ocsf_event=ocsf_event,
+        supported=supported,
+        validation_errors=validation_errors,
+        mapping_attempted=attempted,
+        missing_fields=missing_fields,
+    )
+    return {
+        "raw_event": raw_event,
+        "ocsf_event": ocsf_event,
+        "report": report,
+    }
+
+
 def _build_not_implemented_report(raw_event: Dict[str, Any], source: str) -> Dict[str, Any]:
     ids = raw_event.get("ids") or {}
     return {
@@ -1669,14 +1714,14 @@ async def pipeline_event(source: str, key: str):
                 "report": payload["report"],
             }
         )
-    report = _build_not_implemented_report(matched, source_key)
+    payload = _build_elastic_ocsf_payload(matched)
     return JSONResponse(
         {
             "source": source_key,
             "original": original,
             "raw_envelope": matched,
-            "ocsf": None,
-            "report": report,
+            "ocsf": payload["ocsf_event"],
+            "report": payload["report"],
         }
     )
 
