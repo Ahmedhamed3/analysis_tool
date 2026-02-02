@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ntpath
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -38,6 +39,8 @@ def map_raw_event(raw_event: Dict[str, Any], context: MappingContext) -> Optiona
         return _map_process_activity(raw_event, context)
     if event_id == 4689:
         return _map_process_termination(raw_event, context)
+    if event_id == 4673:
+        return _map_privilege_use(raw_event, context)
     return None
 
 
@@ -104,6 +107,21 @@ def _derive_process_name(path: str) -> Optional[str]:
     return name or None
 
 
+def _split_privileges(value: Optional[str]) -> list[str]:
+    if not value:
+        return []
+    parts = re.split(r"[\\s,]+", value.strip())
+    return [part for part in parts if part]
+
+
+def _get_privilege_field(event_data: Dict[str, str]) -> Optional[str]:
+    for key in ("PrivilegeList", "Privileges", "Privilege"):
+        value = event_data.get(key)
+        if value:
+            return value
+    return None
+
+
 def _get_event_data(raw_event: Dict[str, Any]) -> Dict[str, str]:
     parsed = raw_event.get("parsed") or {}
     event_data = parsed.get("event_data")
@@ -144,11 +162,29 @@ def _get_system_info(raw_event: Dict[str, Any]) -> Dict[str, str]:
 
 def mapping_attempted(raw_event: Dict[str, Any]) -> bool:
     event_id = _get_event_id(raw_event)
-    return event_id in {4624, 4625, 4688, 4689}
+    return event_id in {4624, 4625, 4673, 4688, 4689}
 
 
 def missing_required_fields(raw_event: Dict[str, Any]) -> list[str]:
     event_id = _get_event_id(raw_event)
+    if event_id == 4673:
+        event_data = _get_event_data(raw_event)
+        privilege_value = _normalize_value(_get_privilege_field(event_data))
+        privileges = _split_privileges(privilege_value)
+        subject_user = _build_user(
+            sid=_normalize_value(event_data.get("SubjectUserSid")),
+            name=_normalize_value(event_data.get("SubjectUserName")),
+            domain=_normalize_value(event_data.get("SubjectDomainName")),
+        )
+        time_value = _get_event_time(raw_event)
+        missing: list[str] = []
+        if time_value is None:
+            missing.append("Timestamp")
+        if not (subject_user.get("uid") or subject_user.get("name")):
+            missing.append("SubjectUser")
+        if not privileges:
+            missing.append("PrivilegeList")
+        return missing
     if event_id != 4689:
         return []
     event_data = _get_event_data(raw_event)
@@ -406,6 +442,66 @@ def _map_process_termination(
     if user:
         base["actor"] = {"user": user}
     base["process"] = process
+    return base
+
+
+def _map_privilege_use(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+) -> Optional[Dict[str, Any]]:
+    event_data = _get_event_data(raw_event)
+
+    subject_user = _build_user(
+        sid=_normalize_value(event_data.get("SubjectUserSid")),
+        name=_normalize_value(event_data.get("SubjectUserName")),
+        domain=_normalize_value(event_data.get("SubjectDomainName")),
+    )
+    time_value = _get_event_time(raw_event)
+    privilege_value = _normalize_value(_get_privilege_field(event_data))
+    privileges = _split_privileges(privilege_value)
+
+    if time_value is None or not privileges or not (subject_user.get("uid") or subject_user.get("name")):
+        return None
+
+    class_uid = taxonomy.to_class_uid(
+        taxonomy.IAM_CATEGORY_UID,
+        taxonomy.AUTHORIZE_SESSION_ACTIVITY_UID,
+    )
+    base = _base_event(
+        raw_event,
+        context,
+        category_uid=taxonomy.IAM_CATEGORY_UID,
+        class_uid=class_uid,
+        activity_id=taxonomy.AUTHORIZE_SESSION_ASSIGN_PRIVILEGES_ID,
+    )
+    base["user"] = subject_user
+    base["privileges"] = privileges
+    if subject_user:
+        base["actor"] = {"user": subject_user}
+
+    logon_id = _normalize_value(event_data.get("SubjectLogonId"))
+    if logon_id is None:
+        logon_id = _normalize_value(event_data.get("LogonId"))
+    if logon_id:
+        base["session"] = {"uid": logon_id}
+
+    process_pid = _to_int(_normalize_value(event_data.get("ProcessId")))
+    process_path = _normalize_value(event_data.get("ProcessName"))
+    if process_pid is not None or process_path:
+        process: Dict[str, Any] = {}
+        if process_pid is not None:
+            process["pid"] = process_pid
+        if process_path:
+            process["path"] = process_path
+            process_name = _derive_process_name(process_path)
+            if process_name:
+                process["name"] = process_name
+        base.setdefault("unmapped", {})["process"] = process
+
+    service_name = _normalize_value(event_data.get("Service"))
+    if service_name:
+        base.setdefault("unmapped", {})["service"] = service_name
+
     return base
 
 

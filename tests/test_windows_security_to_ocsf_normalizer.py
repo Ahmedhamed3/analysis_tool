@@ -127,6 +127,99 @@ def test_windows_security_unsupported_event() -> None:
     assert report["supported"] is False
 
 
+def test_windows_security_4673_json() -> None:
+    raw_event = _build_raw_event(
+        4673,
+        {
+            "SubjectUserSid": "S-1-5-21-555",
+            "SubjectUserName": "pat",
+            "SubjectDomainName": "CONTOSO",
+            "SubjectLogonId": "0xAAA",
+            "PrivilegeList": "SeDebugPrivilege SeTcbPrivilege",
+            "ProcessId": "0x1234",
+            "ProcessName": "C:\\\\Windows\\\\System32\\\\svchost.exe",
+        },
+        record_id=310,
+    )
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert report["status"] == "valid"
+    assert report["schema_valid"] is True
+    assert report["supported"] is True
+    assert ocsf_event is not None
+    assert ocsf_event["class_uid"] == 3003
+    assert ocsf_event["activity_id"] == 1
+    assert ocsf_event["metadata"]["event_code"] == "4673"
+    assert ocsf_event["user"]["name"] == "pat"
+    assert ocsf_event["user"]["uid"] == "S-1-5-21-555"
+    assert ocsf_event["session"]["uid"] == "0xAAA"
+    assert ocsf_event["privileges"] == ["SeDebugPrivilege", "SeTcbPrivilege"]
+
+
+def test_windows_security_4673_xml() -> None:
+    xml_payload = """
+    <Event xmlns=\"http://schemas.microsoft.com/win/2004/08/events/event\">
+      <System>
+        <EventID>4673</EventID>
+        <EventRecordID>311</EventRecordID>
+        <TimeCreated SystemTime=\"2024-01-01T12:04:00.000Z\" />
+        <Computer>WIN-TEST</Computer>
+      </System>
+      <EventData>
+        <Data Name=\"SubjectUserSid\">S-1-5-21-666</Data>
+        <Data Name=\"SubjectUserName\">riley</Data>
+        <Data Name=\"SubjectDomainName\">CONTOSO</Data>
+        <Data Name=\"SubjectLogonId\">0xBBB</Data>
+        <Data Name=\"PrivilegeList\">SeImpersonatePrivilege SeBackupPrivilege</Data>
+        <Data Name=\"ProcessId\">9876</Data>
+        <Data Name=\"ProcessName\">C:\\\\Windows\\\\System32\\\\lsass.exe</Data>
+      </EventData>
+    </Event>
+    """.strip()
+    raw_event = _build_raw_event(
+        4673,
+        {
+            "SubjectUserSid": "S-1-5-21-666",
+            "SubjectUserName": "riley",
+        },
+        record_id=311,
+    )
+    raw_event["raw"]["format"] = "xml"
+    raw_event["raw"]["data"] = xml_payload
+    raw_event["raw"]["xml"] = xml_payload
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert report["status"] == "valid"
+    assert report["schema_valid"] is True
+    assert ocsf_event is not None
+    assert ocsf_event["user"]["name"] == "riley"
+    assert ocsf_event["privileges"] == ["SeImpersonatePrivilege", "SeBackupPrivilege"]
+
+
+def test_windows_security_4673_missing_privileges() -> None:
+    raw_event = _build_raw_event(
+        4673,
+        {
+            "SubjectUserSid": "S-1-5-21-777",
+            "SubjectUserName": "sasha",
+            "SubjectDomainName": "CONTOSO",
+        },
+        record_id=312,
+    )
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert ocsf_event is None
+    assert report["status"] == "unmapped"
+    assert report["supported"] is True
+    assert report["missing_fields"] == ["PrivilegeList"]
+
+
 def test_windows_security_4688_json() -> None:
     raw_event = _build_raw_event(
         4688,
