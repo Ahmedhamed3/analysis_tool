@@ -21,6 +21,8 @@ def map_raw_event(raw_event: Dict[str, Any], context: MappingContext) -> Optiona
         return _map_process_terminate(raw_event, context)
     if event_id == 3:
         return _map_network_activity(raw_event, context)
+    if event_id == 22:
+        return map_sysmon_eventid22_to_ocsf(raw_event, context)
     if event_id == 11:
         return _map_file_activity(raw_event, context)
     return None
@@ -28,7 +30,7 @@ def map_raw_event(raw_event: Dict[str, Any], context: MappingContext) -> Optiona
 
 def mapping_attempted(raw_event: Dict[str, Any]) -> bool:
     event_id = _get_event_id(raw_event)
-    return event_id in {1, 3, 5, 11}
+    return event_id in {1, 3, 5, 11, 22}
 
 
 def missing_required_fields(raw_event: Dict[str, Any]) -> list[str]:
@@ -58,6 +60,13 @@ def missing_required_fields(raw_event: Dict[str, Any]) -> list[str]:
         process_guid = _normalize_value(event_data.get("ProcessGuid"))
         target_filename = _normalize_value(event_data.get("TargetFilename"))
         return _missing_required_file_fields(observed_time, pid, process_guid, target_filename)
+    if event_id == 22:
+        event_data = _get_event_data(raw_event)
+        observed_time = _normalize_sysmon_time(event_data.get("UtcTime")) or _get_event_time(raw_event)
+        query_name = _normalize_value(event_data.get("QueryName"))
+        pid = _to_int(_normalize_value(event_data.get("ProcessId")))
+        image = _normalize_value(event_data.get("Image"))
+        return _missing_required_dns_fields(observed_time, query_name, pid, image)
     return []
 
 
@@ -270,6 +279,74 @@ def _map_network_activity(raw_event: Dict[str, Any], context: MappingContext) ->
     return base
 
 
+def map_sysmon_eventid22_to_ocsf(raw_event: Dict[str, Any], context: MappingContext) -> Optional[Dict[str, Any]]:
+    event_id = _get_event_id(raw_event)
+    if event_id != 22:
+        return None
+    event_data = _get_event_data(raw_event)
+    observed_time = _normalize_sysmon_time(event_data.get("UtcTime")) or _get_event_time(raw_event)
+    query_name = _normalize_value(event_data.get("QueryName"))
+    query_type = _normalize_value(event_data.get("QueryType"))
+    query_status = _normalize_value(event_data.get("QueryStatus"))
+    query_results = _normalize_value(event_data.get("QueryResults"))
+    pid = _to_int(_normalize_value(event_data.get("ProcessId")))
+    image = _normalize_value(event_data.get("Image"))
+    process_guid = _normalize_value(event_data.get("ProcessGuid"))
+    user = _normalize_value(event_data.get("User"))
+    missing_fields = _missing_required_dns_fields(observed_time, query_name, pid, image)
+    if missing_fields:
+        return None
+    process = _build_process_entity(
+        pid=pid,
+        uid=process_guid,
+        path=image,
+    )
+    actor = _build_actor(process=process, user=_split_domain_user(user))
+    class_uid = taxonomy.to_class_uid(taxonomy.NETWORK_CATEGORY_UID, taxonomy.DNS_ACTIVITY_UID)
+    base = _base_event(
+        raw_event,
+        context,
+        category_uid=taxonomy.NETWORK_CATEGORY_UID,
+        class_uid=class_uid,
+        activity_id=taxonomy.DNS_ACTIVITY_QUERY_ID,
+    )
+    base["actor"] = actor
+    query: Dict[str, Any] = {"hostname": query_name} if query_name else {}
+    if query_type:
+        query["type"] = query_type
+    if query:
+        base["query"] = query
+    answers = _parse_dns_answers(query_results)
+    if answers:
+        base["answers"] = answers
+    rcode_id = _parse_dns_rcode(query_status)
+    if rcode_id is not None:
+        base["rcode_id"] = rcode_id
+    host = raw_event.get("host") or {}
+    if host.get("hostname"):
+        base["src_endpoint"] = {"hostname": host.get("hostname")}
+    if observed_time:
+        base["time"] = observed_time
+        base.setdefault("metadata", {})["original_time"] = observed_time
+    unmapped_event_data = _extract_unmapped_event_data(
+        event_data,
+        used_keys={
+            "UtcTime",
+            "QueryName",
+            "QueryType",
+            "QueryStatus",
+            "QueryResults",
+            "ProcessGuid",
+            "ProcessId",
+            "Image",
+            "User",
+        },
+    )
+    if unmapped_event_data:
+        base.setdefault("unmapped", {})["event_data"] = unmapped_event_data
+    return base
+
+
 def _map_process_terminate(raw_event: Dict[str, Any], context: MappingContext) -> Optional[Dict[str, Any]]:
     event_data = _get_event_data(raw_event)
     observed_time = _normalize_sysmon_time(event_data.get("UtcTime"))
@@ -422,6 +499,27 @@ def _build_file(*, path: Optional[str]) -> Dict[str, Any]:
     return file_obj
 
 
+def _parse_dns_answers(value: Optional[str]) -> list[Dict[str, Any]]:
+    if not value:
+        return []
+    results: list[Dict[str, Any]] = []
+    for part in str(value).split(";"):
+        cleaned = part.strip()
+        if not cleaned or cleaned == "-":
+            continue
+        results.append({"rdata": cleaned})
+    return results
+
+
+def _parse_dns_rcode(value: Optional[str]) -> Optional[int]:
+    if not value:
+        return None
+    try:
+        return int(str(value).strip(), 0)
+    except (TypeError, ValueError):
+        return None
+
+
 def _missing_required_process_terminate_fields(
     observed_time: Optional[str],
     pid: Optional[int],
@@ -478,6 +576,23 @@ def _missing_required_network_fields(
     if pid is None:
         missing.append("ProcessId")
     if not image:
+        missing.append("Image")
+    return missing
+
+
+def _missing_required_dns_fields(
+    observed_time: Optional[str],
+    query_name: Optional[str],
+    pid: Optional[int],
+    image: Optional[str],
+) -> list[str]:
+    missing: list[str] = []
+    if not observed_time:
+        missing.append("UtcTime")
+    if not query_name:
+        missing.append("QueryName")
+    if pid is None and not image:
+        missing.append("ProcessId")
         missing.append("Image")
     return missing
 

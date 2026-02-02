@@ -67,6 +67,8 @@ def class_path_for_event(event: Dict[str, Any]) -> Optional[str]:
         return "system/process_activity"
     if class_uid == 4001:
         return "network/network_activity"
+    if class_uid == 4003:
+        return "network/dns_activity"
     if class_uid == 1001:
         return "system/file_activity"
     return None
