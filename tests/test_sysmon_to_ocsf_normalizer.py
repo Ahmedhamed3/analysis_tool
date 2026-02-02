@@ -74,6 +74,24 @@ SYSmon_EID11_XML = """<Event xmlns="http://schemas.microsoft.com/win/2004/08/eve
   </EventData>
 </Event>"""
 
+SYSmon_EID5_XML = """<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <Provider Name="Microsoft-Windows-Sysmon" />
+    <EventID>5</EventID>
+    <Level>4</Level>
+    <TimeCreated SystemTime="2024-01-02T03:07:05.678Z" />
+    <EventRecordID>126</EventRecordID>
+    <Channel>Microsoft-Windows-Sysmon/Operational</Channel>
+    <Computer>HOST-A</Computer>
+  </System>
+  <EventData>
+    <Data Name="UtcTime">2024-01-02 03:07:05.678</Data>
+    <Data Name="ProcessId">7777</Data>
+    <Data Name="ProcessGuid">{55555555-5555-5555-5555-555555555555}</Data>
+    <Data Name="Image">C:\\Windows\\System32\\werfault.exe</Data>
+  </EventData>
+</Event>"""
+
 
 def build_raw_event(xml: str, event_id: int, record_id: int, dedupe_hash: str) -> dict:
     return {
@@ -106,6 +124,7 @@ def test_sysmon_mapping_is_schema_valid() -> None:
         build_raw_event(SYSmon_EID1_XML, 1, 123, "sha256:one"),
         build_raw_event(SYSmon_EID3_XML, 3, 124, "sha256:two"),
         build_raw_event(SYSmon_EID11_XML, 11, 125, "sha256:three"),
+        build_raw_event(SYSmon_EID5_XML, 5, 126, "sha256:four"),
     ]
     for raw_event in raw_events:
         mapped = map_raw_event(raw_event, context)
@@ -120,6 +139,53 @@ def test_sysmon_mapping_is_deterministic() -> None:
     schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
     context = MappingContext(ocsf_version=schema_loader.version)
     raw_event = build_raw_event(SYSmon_EID11_XML, 11, 125, "sha256:three")
+    mapped_first = map_raw_event(raw_event, context)
+    mapped_second = map_raw_event(raw_event, context)
+    assert mapped_first == mapped_second
+
+
+def test_sysmon_event5_mapping_schema_valid() -> None:
+    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
+    context = MappingContext(ocsf_version=schema_loader.version)
+    raw_event = build_raw_event(SYSmon_EID5_XML, 5, 126, "sha256:four")
+    mapped = map_raw_event(raw_event, context)
+    assert mapped is not None
+    assert mapped["class_uid"] == 1007
+    assert mapped["activity_id"] == 2
+    class_path = class_path_for_event(mapped)
+    assert class_path is not None
+    result = schema_loader.validate_event(mapped, class_path)
+    assert result.valid, result.errors
+
+
+def test_sysmon_event5_missing_process_id_unmapped() -> None:
+    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
+    context = MappingContext(ocsf_version=schema_loader.version)
+    xml_payload = SYSmon_EID5_XML.replace(
+        '<Data Name="ProcessId">7777</Data>',
+        "",
+    )
+    raw_event = build_raw_event(xml_payload, 5, 127, "sha256:five")
+    mapped = map_raw_event(raw_event, context)
+    assert mapped is None
+
+
+def test_sysmon_event5_missing_image_unmapped() -> None:
+    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
+    context = MappingContext(ocsf_version=schema_loader.version)
+    xml_payload = SYSmon_EID5_XML.replace(
+        '<Data Name="Image">C:\\Windows\\System32\\werfault.exe</Data>',
+        "",
+    )
+    raw_event = build_raw_event(xml_payload, 5, 128, "sha256:six")
+    mapped = map_raw_event(raw_event, context)
+    assert mapped is None
+
+
+def test_sysmon_event5_mapping_is_deterministic() -> None:
+    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
+    context = MappingContext(ocsf_version=schema_loader.version)
+    raw_event = build_raw_event(SYSmon_EID5_XML, 5, 126, "sha256:four")
     mapped_first = map_raw_event(raw_event, context)
     mapped_second = map_raw_event(raw_event, context)
     assert mapped_first == mapped_second

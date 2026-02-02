@@ -17,6 +17,8 @@ def map_raw_event(raw_event: Dict[str, Any], context: MappingContext) -> Optiona
     event_id = _get_event_id(raw_event)
     if event_id == 1:
         return _map_process_activity(raw_event, context)
+    if event_id == 5:
+        return _map_process_terminate(raw_event, context)
     if event_id == 3:
         return _map_network_activity(raw_event, context)
     if event_id == 11:
@@ -187,6 +189,40 @@ def _map_network_activity(raw_event: Dict[str, Any], context: MappingContext) ->
     return base
 
 
+def _map_process_terminate(raw_event: Dict[str, Any], context: MappingContext) -> Optional[Dict[str, Any]]:
+    event_data = _get_event_data(raw_event)
+    observed_time = _normalize_sysmon_time(event_data.get("UtcTime"))
+    pid = _to_int(event_data.get("ProcessId"))
+    image = event_data.get("Image")
+    missing_fields = _missing_required_process_terminate_fields(observed_time, pid, image)
+    if missing_fields:
+        return None
+    process = _build_process_entity(
+        pid=pid,
+        uid=event_data.get("ProcessGuid"),
+        path=image,
+    )
+    class_uid = taxonomy.to_class_uid(taxonomy.SYSTEM_CATEGORY_UID, taxonomy.PROCESS_ACTIVITY_UID)
+    base = _base_event(
+        raw_event,
+        context,
+        category_uid=taxonomy.SYSTEM_CATEGORY_UID,
+        class_uid=class_uid,
+        activity_id=taxonomy.PROCESS_ACTIVITY_TERMINATE_ID,
+    )
+    base["process"] = process
+    if observed_time:
+        base["time"] = observed_time
+        base.setdefault("metadata", {})["original_time"] = observed_time
+    unmapped_event_data = _extract_unmapped_event_data(
+        event_data,
+        used_keys={"ProcessGuid", "ProcessId", "Image", "UtcTime"},
+    )
+    if unmapped_event_data:
+        base.setdefault("unmapped", {})["event_data"] = unmapped_event_data
+    return base
+
+
 def _map_file_activity(raw_event: Dict[str, Any], context: MappingContext) -> Optional[Dict[str, Any]]:
     event_data = _get_event_data(raw_event)
     process = _build_process_entity(
@@ -268,6 +304,25 @@ def _build_file(*, path: Optional[str]) -> Dict[str, Any]:
         file_obj["path"] = path
         file_obj["name"] = Path(path).name
     return file_obj
+
+
+def _missing_required_process_terminate_fields(
+    observed_time: Optional[str],
+    pid: Optional[int],
+    image: Optional[str],
+) -> list[str]:
+    missing: list[str] = []
+    if not observed_time:
+        missing.append("UtcTime")
+    if pid is None:
+        missing.append("ProcessId")
+    if not image:
+        missing.append("Image")
+    return missing
+
+
+def _extract_unmapped_event_data(event_data: Dict[str, str], *, used_keys: set[str]) -> Dict[str, str]:
+    return {key: value for key, value in event_data.items() if key not in used_keys and value}
 
 
 def _map_severity_id(value: Any) -> int:
