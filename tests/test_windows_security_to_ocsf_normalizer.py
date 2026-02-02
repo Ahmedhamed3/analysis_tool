@@ -400,3 +400,207 @@ def test_windows_security_4689_missing_required_fields() -> None:
     assert report["supported"] is True
     assert report["missing_fields"] == ["ProcessId", "ProcessName"]
     assert "missing required fields" in report["message"]
+
+
+def test_windows_security_4697_json() -> None:
+    raw_event = _build_raw_event(
+        4697,
+        {
+            "SubjectUserSid": "S-1-5-21-12345",
+            "SubjectUserName": "alex",
+            "SubjectDomainName": "CONTOSO",
+            "ServiceName": "ExampleService",
+            "ServiceFileName": "C:\\\\Program Files\\\\Example\\\\service.exe",
+            "ServiceType": "Win32OwnProcess",
+            "StartType": "AutoStart",
+            "AccountName": "LocalSystem",
+            "ProcessId": "0x1f4",
+        },
+        record_id=600,
+    )
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert report["status"] == "valid"
+    assert report["schema_valid"] is True
+    assert report["supported"] is True
+    assert ocsf_event is not None
+    assert ocsf_event["class_uid"] == 1007
+    assert ocsf_event["activity_id"] == 1
+    assert ocsf_event["process"]["pid"] == 500
+    assert ocsf_event["process"]["path"].endswith("service.exe")
+    assert ocsf_event["process"]["name"] == "service.exe"
+    assert ocsf_event["actor"]["user"]["name"] == "alex"
+    assert ocsf_event["unmapped"]["service"] == {
+        "name": "ExampleService",
+        "start_type": "AutoStart",
+        "service_type": "Win32OwnProcess",
+        "account": "LocalSystem",
+    }
+
+
+def test_windows_security_4697_xml() -> None:
+    xml_payload = """
+    <Event xmlns=\"http://schemas.microsoft.com/win/2004/08/events/event\">
+      <System>
+        <EventID>4697</EventID>
+        <EventRecordID>601</EventRecordID>
+        <TimeCreated SystemTime=\"2024-01-01T12:05:00.000Z\" />
+        <Computer>WIN-TEST</Computer>
+      </System>
+      <EventData>
+        <Data Name=\"SubjectUserSid\">S-1-5-21-22222</Data>
+        <Data Name=\"SubjectUserName\">jamie</Data>
+        <Data Name=\"SubjectDomainName\">CONTOSO</Data>
+        <Data Name=\"ServiceName\">XmlService</Data>
+        <Data Name=\"ServiceFileName\">C:\\\\Services\\\\xmlsvc.exe</Data>
+        <Data Name=\"ServiceType\">Win32ShareProcess</Data>
+        <Data Name=\"StartType\">DemandStart</Data>
+        <Data Name=\"AccountName\">NT AUTHORITY\\\\LocalService</Data>
+        <Data Name=\"ProcessId\">4321</Data>
+      </EventData>
+    </Event>
+    """.strip()
+    raw_event = _build_raw_event(
+        4697,
+        {
+            "SubjectUserSid": "S-1-5-21-22222",
+            "SubjectUserName": "jamie",
+        },
+        record_id=601,
+    )
+    raw_event["raw"]["format"] = "xml"
+    raw_event["raw"]["data"] = xml_payload
+    raw_event["raw"]["xml"] = xml_payload
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert report["status"] == "valid"
+    assert report["schema_valid"] is True
+    assert ocsf_event is not None
+    assert ocsf_event["process"]["pid"] == 4321
+    assert ocsf_event["process"]["name"] == "xmlsvc.exe"
+    assert ocsf_event["actor"]["user"]["name"] == "jamie"
+    assert ocsf_event["unmapped"]["service"]["name"] == "XmlService"
+
+
+def test_windows_security_4697_missing_required_fields() -> None:
+    raw_event = _build_raw_event(
+        4697,
+        {
+            "SubjectUserSid": "S-1-5-21-33333",
+            "SubjectUserName": "lee",
+            "ServiceName": "MissingFileName",
+        },
+        record_id=602,
+    )
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert ocsf_event is None
+    assert report["status"] == "unmapped"
+    assert report["supported"] is True
+    assert report["schema_valid"] is False
+    assert report["missing_fields"] == ["ServiceFileName"]
+
+
+def test_windows_security_4698_json() -> None:
+    raw_event = _build_raw_event(
+        4698,
+        {
+            "SubjectUserSid": "S-1-5-21-44444",
+            "SubjectUserName": "morgan",
+            "SubjectDomainName": "CONTOSO",
+            "TaskName": "\\\\ExampleTask",
+            "TaskContent": "<Task><Actions><Exec><Command>cmd.exe</Command></Exec></Actions></Task>",
+            "ProcessName": "C:\\\\Windows\\\\System32\\\\schtasks.exe",
+            "ProcessId": "0x2bc",
+        },
+        record_id=700,
+    )
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert report["status"] == "valid"
+    assert report["schema_valid"] is True
+    assert report["supported"] is True
+    assert ocsf_event is not None
+    assert ocsf_event["class_uid"] == 1007
+    assert ocsf_event["activity_id"] == 1
+    assert ocsf_event["process"]["pid"] == 700
+    assert ocsf_event["process"]["name"] == "schtasks.exe"
+    assert ocsf_event["actor"]["user"]["name"] == "morgan"
+    assert ocsf_event["unmapped"]["scheduled_task"] == {
+        "name": "\\\\ExampleTask",
+        "xml": "<Task><Actions><Exec><Command>cmd.exe</Command></Exec></Actions></Task>",
+        "command": "C:\\\\Windows\\\\System32\\\\schtasks.exe",
+    }
+
+
+def test_windows_security_4698_xml() -> None:
+    xml_payload = """
+    <Event xmlns=\"http://schemas.microsoft.com/win/2004/08/events/event\">
+      <System>
+        <EventID>4698</EventID>
+        <EventRecordID>701</EventRecordID>
+        <TimeCreated SystemTime=\"2024-01-01T12:06:00.000Z\" />
+        <Computer>WIN-TEST</Computer>
+      </System>
+      <EventData>
+        <Data Name=\"SubjectUserSid\">S-1-5-21-55555</Data>
+        <Data Name=\"SubjectUserName\">taylor</Data>
+        <Data Name=\"SubjectDomainName\">CONTOSO</Data>
+        <Data Name=\"TaskName\">\\\\XmlTask</Data>
+        <Data Name=\"TaskXml\"><Task /></Data>
+        <Data Name=\"ProcessName\">C:\\\\Windows\\\\System32\\\\taskeng.exe</Data>
+        <Data Name=\"ProcessId\">2048</Data>
+      </EventData>
+    </Event>
+    """.strip()
+    raw_event = _build_raw_event(
+        4698,
+        {
+            "SubjectUserSid": "S-1-5-21-55555",
+            "SubjectUserName": "taylor",
+        },
+        record_id=701,
+    )
+    raw_event["raw"]["format"] = "xml"
+    raw_event["raw"]["data"] = xml_payload
+    raw_event["raw"]["xml"] = xml_payload
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert report["status"] == "valid"
+    assert report["schema_valid"] is True
+    assert ocsf_event is not None
+    assert ocsf_event["process"]["pid"] == 2048
+    assert ocsf_event["process"]["name"] == "taskeng.exe"
+    assert ocsf_event["actor"]["user"]["name"] == "taylor"
+    assert ocsf_event["unmapped"]["scheduled_task"]["name"] == "\\\\XmlTask"
+
+
+def test_windows_security_4698_missing_required_fields() -> None:
+    raw_event = _build_raw_event(
+        4698,
+        {
+            "SubjectUserSid": "S-1-5-21-66666",
+            "SubjectUserName": "casey",
+            "ProcessName": "C:\\\\Windows\\\\System32\\\\taskeng.exe",
+        },
+        record_id=702,
+    )
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert ocsf_event is None
+    assert report["status"] == "unmapped"
+    assert report["supported"] is True
+    assert report["schema_valid"] is False
+    assert report["missing_fields"] == ["TaskName"]
