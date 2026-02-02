@@ -26,6 +26,34 @@ def map_raw_event(raw_event: Dict[str, Any], context: MappingContext) -> Optiona
     return None
 
 
+def mapping_attempted(raw_event: Dict[str, Any]) -> bool:
+    event_id = _get_event_id(raw_event)
+    return event_id in {1, 3, 5, 11}
+
+
+def missing_required_fields(raw_event: Dict[str, Any]) -> list[str]:
+    event_id = _get_event_id(raw_event)
+    if event_id == 3:
+        event_data = _get_event_data(raw_event)
+        time_value = _normalize_sysmon_time(event_data.get("UtcTime")) or _get_event_time(raw_event)
+        protocol = _normalize_value(event_data.get("Protocol"))
+        if protocol:
+            protocol = protocol.lower()
+        src_ip = _normalize_value(event_data.get("SourceIp"))
+        dst_ip = _normalize_value(event_data.get("DestinationIp"))
+        dst_port = _to_int(_normalize_value(event_data.get("DestinationPort")))
+        pid = _to_int(_normalize_value(event_data.get("ProcessId")))
+        image = _normalize_value(event_data.get("Image"))
+        return _missing_required_network_fields(time_value, protocol, src_ip, dst_ip, dst_port, pid, image)
+    if event_id == 5:
+        event_data = _get_event_data(raw_event)
+        observed_time = _normalize_sysmon_time(event_data.get("UtcTime"))
+        pid = _to_int(event_data.get("ProcessId"))
+        image = event_data.get("Image")
+        return _missing_required_process_terminate_fields(observed_time, pid, image)
+    return []
+
+
 def _get_event_id(raw_event: Dict[str, Any]) -> Optional[int]:
     ids = raw_event.get("ids") or {}
     event_id = ids.get("event_id")
@@ -79,6 +107,15 @@ def _to_int(value: Optional[str]) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_value(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text == "-":
+        return None
+    return text
 
 
 def _base_event(raw_event: Dict[str, Any], context: MappingContext, *, category_uid: int, class_uid: int, activity_id: int) -> Dict[str, Any]:
@@ -161,19 +198,32 @@ def _map_process_activity(raw_event: Dict[str, Any], context: MappingContext) ->
 
 def _map_network_activity(raw_event: Dict[str, Any], context: MappingContext) -> Optional[Dict[str, Any]]:
     event_data = _get_event_data(raw_event)
+    observed_time = _normalize_sysmon_time(event_data.get("UtcTime")) or _get_event_time(raw_event)
+    protocol = _normalize_value(event_data.get("Protocol"))
+    if protocol:
+        protocol = protocol.lower()
+    src_ip = _normalize_value(event_data.get("SourceIp"))
+    src_port = _to_int(_normalize_value(event_data.get("SourcePort")))
+    dst_ip = _normalize_value(event_data.get("DestinationIp"))
+    dst_port = _to_int(_normalize_value(event_data.get("DestinationPort")))
+    pid = _to_int(_normalize_value(event_data.get("ProcessId")))
+    image = _normalize_value(event_data.get("Image"))
+    missing_fields = _missing_required_network_fields(observed_time, protocol, src_ip, dst_ip, dst_port, pid, image)
+    if missing_fields:
+        return None
     process = _build_process_entity(
-        pid=_to_int(event_data.get("ProcessId")),
+        pid=pid,
         uid=event_data.get("ProcessGuid"),
-        path=event_data.get("Image"),
+        path=image,
     )
-    actor = _build_actor(process=process, user=_split_domain_user(event_data.get("User")))
+    actor = _build_actor(process=process, user=_split_domain_user(_normalize_value(event_data.get("User"))))
     src_endpoint = _build_network_endpoint(
-        ip=event_data.get("SourceIp"),
-        port=_to_int(event_data.get("SourcePort")),
+        ip=src_ip,
+        port=src_port,
     )
     dst_endpoint = _build_network_endpoint(
-        ip=event_data.get("DestinationIp"),
-        port=_to_int(event_data.get("DestinationPort")),
+        ip=dst_ip,
+        port=dst_port,
     )
     class_uid = taxonomy.to_class_uid(taxonomy.NETWORK_CATEGORY_UID, taxonomy.NETWORK_ACTIVITY_UID)
     base = _base_event(
@@ -183,9 +233,33 @@ def _map_network_activity(raw_event: Dict[str, Any], context: MappingContext) ->
         class_uid=class_uid,
         activity_id=taxonomy.NETWORK_ACTIVITY_OPEN_ID,
     )
+    base["connection_info"] = {
+        "direction_id": taxonomy.NETWORK_DIRECTION_UNKNOWN_ID,
+        "protocol_name": protocol,
+    }
     base["actor"] = actor
     base["src_endpoint"] = src_endpoint
     base["dst_endpoint"] = dst_endpoint
+    if observed_time:
+        base["time"] = observed_time
+        base.setdefault("metadata", {})["original_time"] = observed_time
+    unmapped_event_data = _extract_unmapped_event_data(
+        event_data,
+        used_keys={
+            "UtcTime",
+            "ProcessGuid",
+            "ProcessId",
+            "Image",
+            "User",
+            "SourceIp",
+            "SourcePort",
+            "DestinationIp",
+            "DestinationPort",
+            "Protocol",
+        },
+    )
+    if unmapped_event_data:
+        base.setdefault("unmapped", {})["event_data"] = unmapped_event_data
     return base
 
 
@@ -314,6 +388,33 @@ def _missing_required_process_terminate_fields(
     missing: list[str] = []
     if not observed_time:
         missing.append("UtcTime")
+    if pid is None:
+        missing.append("ProcessId")
+    if not image:
+        missing.append("Image")
+    return missing
+
+
+def _missing_required_network_fields(
+    observed_time: Optional[str],
+    protocol: Optional[str],
+    src_ip: Optional[str],
+    dst_ip: Optional[str],
+    dst_port: Optional[int],
+    pid: Optional[int],
+    image: Optional[str],
+) -> list[str]:
+    missing: list[str] = []
+    if not observed_time:
+        missing.append("UtcTime")
+    if not protocol:
+        missing.append("Protocol")
+    if not src_ip:
+        missing.append("SourceIp")
+    if not dst_ip:
+        missing.append("DestinationIp")
+    if dst_port is None:
+        missing.append("DestinationPort")
     if pid is None:
         missing.append("ProcessId")
     if not image:
