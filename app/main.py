@@ -37,6 +37,13 @@ from app.normalizers.sysmon_to_ocsf.io_ndjson import class_path_for_event
 from app.normalizers.sysmon_to_ocsf.mapper import MappingContext, map_raw_event
 from app.normalizers.sysmon_to_ocsf.report import build_report
 from app.normalizers.sysmon_to_ocsf.validator import OcsfSchemaLoader
+from app.normalizers.windows_security_to_ocsf.io_ndjson import (
+    class_path_for_event as security_class_path_for_event,
+)
+from app.normalizers.windows_security_to_ocsf.mapper import (
+    MappingContext as SecurityMappingContext,
+    map_raw_event as map_security_raw_event,
+)
 from app.utils.http_status import tail_ndjson
 from app.utils.timeutil import utc_now_iso
 
@@ -968,6 +975,33 @@ def _build_sysmon_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _build_security_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
+    schema_loader = _get_ocsf_schema_loader()
+    context = SecurityMappingContext(ocsf_version=schema_loader.version)
+    ocsf_event = map_security_raw_event(raw_event, context)
+    supported = ocsf_event is not None
+    validation_errors: List[str] = []
+    if supported and ocsf_event is not None:
+        class_path = security_class_path_for_event(ocsf_event)
+        if class_path:
+            validation = schema_loader.validate_event(ocsf_event, class_path)
+            validation_errors = validation.errors
+        else:
+            supported = False
+            ocsf_event = None
+    report = build_report(
+        raw_event=raw_event,
+        ocsf_event=ocsf_event,
+        supported=supported,
+        validation_errors=validation_errors,
+    )
+    return {
+        "raw_event": raw_event,
+        "ocsf_event": ocsf_event,
+        "report": report,
+    }
+
+
 def _build_not_implemented_report(raw_event: Dict[str, Any], source: str) -> Dict[str, Any]:
     ids = raw_event.get("ids") or {}
     return {
@@ -986,6 +1020,8 @@ def _build_not_implemented_report(raw_event: Dict[str, Any], source: str) -> Dic
 def _extract_original_payload(raw_event: Dict[str, Any], source: str) -> Any:
     raw = raw_event.get("raw") or {}
     if source == "sysmon":
+        return raw.get("xml") or raw.get("data")
+    if source == "security":
         return raw.get("xml") or raw.get("data")
     return raw.get("data")
 
@@ -1597,6 +1633,17 @@ async def pipeline_event(source: str, key: str):
     original = _extract_original_payload(matched, source_key)
     if source_key == "sysmon":
         payload = _build_sysmon_ocsf_payload(matched)
+        return JSONResponse(
+            {
+                "source": source_key,
+                "original": original,
+                "raw_envelope": matched,
+                "ocsf": payload["ocsf_event"],
+                "report": payload["report"],
+            }
+        )
+    if source_key == "security":
+        payload = _build_security_ocsf_payload(matched)
         return JSONResponse(
             {
                 "source": source_key,

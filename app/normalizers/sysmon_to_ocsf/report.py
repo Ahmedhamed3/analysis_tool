@@ -16,12 +16,14 @@ def build_report(
         "dedupe_hash": ids.get("dedupe_hash"),
         "event_id": ids.get("event_id"),
         "supported": supported,
-        "schema_valid": not validation_errors if supported else False,
+        "schema_valid": bool(ocsf_event) and not validation_errors if supported else False,
         "validation_errors": validation_errors,
         "mapped": ocsf_event is not None,
     }
     if not supported:
         report["status"] = "unsupported"
+    elif ocsf_event is None:
+        report["status"] = "unmapped"
     elif validation_errors:
         report["status"] = "invalid"
     else:
