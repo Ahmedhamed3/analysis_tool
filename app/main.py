@@ -44,6 +44,7 @@ from app.normalizers.windows_security_to_ocsf.mapper import (
     MappingContext as SecurityMappingContext,
     map_raw_event as map_security_raw_event,
     mapping_attempted as security_mapping_attempted,
+    missing_required_fields as security_missing_required_fields,
 )
 from app.utils.http_status import tail_ndjson
 from app.utils.timeutil import utc_now_iso
@@ -880,8 +881,12 @@ PIPELINE_UI_TEMPLATE = Template(
         rawPanel.textContent = formatJson(payload.raw_envelope, "Not available.");
         if (payload.ocsf) {
           ocsfPanel.textContent = formatJson(payload.ocsf, "Not available.");
-        } else {
+        } else if (payload.report?.status === "unsupported") {
           ocsfPanel.textContent = "Not supported yet.";
+        } else if (payload.report?.message) {
+          ocsfPanel.textContent = payload.report.message;
+        } else {
+          ocsfPanel.textContent = "No OCSF output.";
         }
         reportPanel.textContent = formatJson(payload.report, "Not available.");
       }
@@ -980,8 +985,9 @@ def _build_security_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
     schema_loader = _get_ocsf_schema_loader()
     context = SecurityMappingContext(ocsf_version=schema_loader.version)
     ocsf_event = map_security_raw_event(raw_event, context)
-    supported = ocsf_event is not None
     attempted = security_mapping_attempted(raw_event)
+    supported = attempted
+    missing_fields = security_missing_required_fields(raw_event)
     validation_errors: List[str] = []
     if supported and ocsf_event is not None:
         class_path = security_class_path_for_event(ocsf_event)
@@ -997,6 +1003,7 @@ def _build_security_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
         supported=supported,
         validation_errors=validation_errors,
         mapping_attempted=attempted,
+        missing_fields=missing_fields,
     )
     return {
         "raw_event": raw_event,

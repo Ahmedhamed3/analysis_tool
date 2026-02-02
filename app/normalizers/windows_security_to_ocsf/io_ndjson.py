@@ -10,6 +10,7 @@ from app.normalizers.windows_security_to_ocsf.mapper import (
     MappingContext,
     map_raw_event,
     mapping_attempted,
+    missing_required_fields,
 )
 
 
@@ -31,8 +32,9 @@ def convert_events(
     context = MappingContext(ocsf_version=schema_loader.version)
     for raw_event in raw_events:
         ocsf_event = map_raw_event(raw_event, context)
-        supported = ocsf_event is not None
         attempted = mapping_attempted(raw_event)
+        supported = attempted
+        missing_fields = missing_required_fields(raw_event)
         validation_errors: List[str] = []
         if supported and ocsf_event is not None:
             class_path = class_path_for_event(ocsf_event)
@@ -50,6 +52,7 @@ def convert_events(
             supported=supported,
             validation_errors=validation_errors,
             mapping_attempted=attempted,
+            missing_fields=missing_fields,
         )
         yield ocsf_event, report
 
