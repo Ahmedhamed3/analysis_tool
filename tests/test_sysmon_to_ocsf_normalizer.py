@@ -56,25 +56,7 @@ SYSmon_EID3_XML = """<Event xmlns="http://schemas.microsoft.com/win/2004/08/even
   </EventData>
 </Event>"""
 
-SYSmon_EID11_XML = """<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
-  <System>
-    <Provider Name="Microsoft-Windows-Sysmon" />
-    <EventID>11</EventID>
-    <Level>4</Level>
-    <TimeCreated SystemTime="2024-01-02T03:06:05.678Z" />
-    <EventRecordID>125</EventRecordID>
-    <Channel>Microsoft-Windows-Sysmon/Operational</Channel>
-    <Computer>HOST-A</Computer>
-  </System>
-  <EventData>
-    <Data Name="ProcessId">5555</Data>
-    <Data Name="ProcessGuid">{44444444-4444-4444-4444-444444444444}</Data>
-    <Data Name="Image">C:\\Windows\\System32\\notepad.exe</Data>
-    <Data Name="CommandLine">notepad.exe C:\\Temp\\notes.txt</Data>
-    <Data Name="TargetFilename">C:\\Temp\\notes.txt</Data>
-    <Data Name="User">CONTOSO\\jdoe</Data>
-  </EventData>
-</Event>"""
+SYSmon_EID11_XML = Path("samples/sysmon_eventid11.xml").read_text(encoding="utf-8")
 
 SYSmon_EID5_XML = """<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
   <System>
@@ -144,6 +126,11 @@ def test_sysmon_mapping_is_deterministic() -> None:
     mapped_first = map_raw_event(raw_event, context)
     mapped_second = map_raw_event(raw_event, context)
     assert mapped_first == mapped_second
+    assert mapped_first is not None
+    assert mapped_first["metadata"]["uid"] == "sha256:three"
+    hashes = {entry["algorithm_id"]: entry["value"] for entry in mapped_first["file"]["hashes"]}
+    assert hashes[3].startswith("c")
+    assert hashes[1].startswith("d")
 
 
 def test_sysmon_event5_mapping_schema_valid() -> None:
@@ -228,6 +215,22 @@ def test_sysmon_event3_missing_fields_unmapped() -> None:
     assert report["mapped"] is False
     assert report["status"] == "unmapped"
     assert "DestinationIp" in report["missing_fields"]
+
+
+def test_sysmon_event11_missing_fields_unmapped() -> None:
+    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
+    xml_payload = SYSmon_EID11_XML.replace(
+        '<Data Name="TargetFilename">C:\\Temp\\notes.txt</Data>',
+        "",
+    )
+    raw_event = build_raw_event(xml_payload, 11, 130, "sha256:eight")
+    results = list(convert_events([raw_event], schema_loader=schema_loader, strict=False))
+    mapped, report = results[0]
+    assert mapped is None
+    assert report["supported"] is True
+    assert report["mapped"] is False
+    assert report["status"] == "unmapped"
+    assert "TargetFilename" in report["missing_fields"]
 
 
 def test_sysmon_event3_mapping_is_deterministic() -> None:

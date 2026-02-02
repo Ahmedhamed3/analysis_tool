@@ -51,6 +51,13 @@ def missing_required_fields(raw_event: Dict[str, Any]) -> list[str]:
         pid = _to_int(event_data.get("ProcessId"))
         image = event_data.get("Image")
         return _missing_required_process_terminate_fields(observed_time, pid, image)
+    if event_id == 11:
+        event_data = _get_event_data(raw_event)
+        observed_time = _normalize_sysmon_time(event_data.get("UtcTime"))
+        pid = _to_int(_normalize_value(event_data.get("ProcessId")))
+        process_guid = _normalize_value(event_data.get("ProcessGuid"))
+        target_filename = _normalize_value(event_data.get("TargetFilename"))
+        return _missing_required_file_fields(observed_time, pid, process_guid, target_filename)
     return []
 
 
@@ -299,14 +306,31 @@ def _map_process_terminate(raw_event: Dict[str, Any], context: MappingContext) -
 
 def _map_file_activity(raw_event: Dict[str, Any], context: MappingContext) -> Optional[Dict[str, Any]]:
     event_data = _get_event_data(raw_event)
+    observed_time = _normalize_sysmon_time(event_data.get("UtcTime"))
+    pid = _to_int(_normalize_value(event_data.get("ProcessId")))
+    process_guid = _normalize_value(event_data.get("ProcessGuid"))
+    target_filename = _normalize_value(event_data.get("TargetFilename"))
+    missing_fields = _missing_required_file_fields(observed_time, pid, process_guid, target_filename)
+    if missing_fields:
+        return None
+    image = _normalize_value(event_data.get("Image"))
+    command_line = _normalize_value(event_data.get("CommandLine"))
     process = _build_process_entity(
-        pid=_to_int(event_data.get("ProcessId")),
-        uid=event_data.get("ProcessGuid"),
-        path=event_data.get("Image"),
-        cmd_line=event_data.get("CommandLine"),
+        pid=pid,
+        uid=process_guid,
+        path=image,
+        cmd_line=command_line,
     )
-    actor = _build_actor(process=process, user=_split_domain_user(event_data.get("User")))
-    file_obj = _build_file(path=event_data.get("TargetFilename"))
+    actor = _build_actor(process=process, user=_split_domain_user(_normalize_value(event_data.get("User"))))
+    file_obj = _build_file(path=target_filename)
+    hashes = _parse_sysmon_hashes(event_data.get("Hashes"))
+    file_hashes: list[Dict[str, Any]] = []
+    if hashes.get("sha256"):
+        file_hashes.append({"algorithm_id": 3, "algorithm": "SHA-256", "value": hashes["sha256"]})
+    if hashes.get("md5"):
+        file_hashes.append({"algorithm_id": 1, "algorithm": "MD5", "value": hashes["md5"]})
+    if file_hashes:
+        file_obj["hashes"] = file_hashes
     class_uid = taxonomy.to_class_uid(taxonomy.SYSTEM_CATEGORY_UID, taxonomy.FILE_ACTIVITY_UID)
     base = _base_event(
         raw_event,
@@ -317,6 +341,24 @@ def _map_file_activity(raw_event: Dict[str, Any], context: MappingContext) -> Op
     )
     base["actor"] = actor
     base["file"] = file_obj
+    if observed_time:
+        base["time"] = observed_time
+        base.setdefault("metadata", {})["original_time"] = observed_time
+    unmapped_event_data = _extract_unmapped_event_data(
+        event_data,
+        used_keys={
+            "UtcTime",
+            "ProcessId",
+            "ProcessGuid",
+            "Image",
+            "CommandLine",
+            "User",
+            "TargetFilename",
+            "Hashes",
+        },
+    )
+    if unmapped_event_data:
+        base.setdefault("unmapped", {})["event_data"] = unmapped_event_data
     return base
 
 
@@ -395,6 +437,24 @@ def _missing_required_process_terminate_fields(
     return missing
 
 
+def _missing_required_file_fields(
+    observed_time: Optional[str],
+    pid: Optional[int],
+    process_guid: Optional[str],
+    target_filename: Optional[str],
+) -> list[str]:
+    missing: list[str] = []
+    if not observed_time:
+        missing.append("UtcTime")
+    if pid is None:
+        missing.append("ProcessId")
+    if not process_guid:
+        missing.append("ProcessGuid")
+    if not target_filename:
+        missing.append("TargetFilename")
+    return missing
+
+
 def _missing_required_network_fields(
     observed_time: Optional[str],
     protocol: Optional[str],
@@ -424,6 +484,31 @@ def _missing_required_network_fields(
 
 def _extract_unmapped_event_data(event_data: Dict[str, str], *, used_keys: set[str]) -> Dict[str, str]:
     return {key: value for key, value in event_data.items() if key not in used_keys and value}
+
+
+def _parse_sysmon_hashes(value: Any) -> Dict[str, str]:
+    hashes: Dict[str, str] = {}
+    if isinstance(value, dict):
+        items = list(value.items())
+    elif isinstance(value, str):
+        items = []
+        for part in value.split(","):
+            if not part or "=" not in part:
+                continue
+            key, hash_value = part.split("=", 1)
+            items.append((key, hash_value))
+    else:
+        return hashes
+
+    for key, hash_value in items:
+        if key is None or hash_value is None:
+            continue
+        normalized_key = str(key).strip().lower()
+        normalized_value = str(hash_value).strip()
+        if not normalized_key or not normalized_value:
+            continue
+        hashes[normalized_key] = normalized_value
+    return hashes
 
 
 def _map_severity_id(value: Any) -> int:
