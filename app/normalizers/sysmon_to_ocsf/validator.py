@@ -201,10 +201,10 @@ class OcsfSchemaLoader:
         return {"anyOf": any_of}
 
     def _type_schema(self, type_name: str, dictionary_attr: Dict[str, Any]) -> Dict[str, Any]:
-        if type_name in self._object_types():
-            return self._object_schema(type_name)
         if type_name == "object":
             return {"type": "object"}
+        if type_name in self._object_types():
+            return self._object_schema(type_name)
         if type_name == "json_t":
             return {"type": "object"}
         if type_name == "boolean_t":
