@@ -15,6 +15,8 @@ class MappingContext:
 
 def map_raw_event(raw_event: Dict[str, Any], context: MappingContext) -> Optional[Dict[str, Any]]:
     source = _extract_source(raw_event)
+    if _is_windows_security_privilege_use(source):
+        return _map_windows_security_privilege_use(raw_event, context)
     if _is_authentication_event(source):
         return _map_authentication_activity(raw_event, context)
     if _is_process_event(source):
@@ -30,6 +32,8 @@ def mapping_attempted(raw_event: Dict[str, Any]) -> bool:
 
 def missing_required_fields(raw_event: Dict[str, Any]) -> list[str]:
     source = _extract_source(raw_event)
+    if _is_windows_security_privilege_use(source):
+        return _missing_required_privilege_fields(raw_event, source)
     if _is_authentication_event(source):
         return _missing_required_authentication_fields(raw_event, source)
     if _is_process_event(source):
@@ -76,6 +80,11 @@ def _get_host_block(source: Dict[str, Any]) -> Dict[str, Any]:
     return host if isinstance(host, dict) else {}
 
 
+def _get_winlog_block(source: Dict[str, Any]) -> Dict[str, Any]:
+    winlog = source.get("winlog")
+    return winlog if isinstance(winlog, dict) else {}
+
+
 def _coerce_str(value: Any) -> Optional[str]:
     if isinstance(value, str):
         stripped = value.strip()
@@ -95,6 +104,16 @@ def _coerce_list(value: Any) -> list[str]:
 def _contains_any(values: Iterable[str], options: Iterable[str]) -> bool:
     lowered = {value.lower() for value in values}
     return any(option.lower() in lowered for option in options)
+
+
+def _is_windows_security_privilege_use(source: Dict[str, Any]) -> bool:
+    event = _get_event_block(source)
+    event_code = _coerce_str(event.get("code"))
+    if event_code != "4673":
+        return False
+    winlog = _get_winlog_block(source)
+    channel = _coerce_str(winlog.get("channel"))
+    return channel == "Security"
 
 
 def _is_authentication_event(source: Dict[str, Any]) -> bool:
@@ -221,6 +240,27 @@ def _extract_user(source: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _extract_winlog_event_data(source: Dict[str, Any]) -> Dict[str, Any]:
+    winlog = _get_winlog_block(source)
+    event_data = winlog.get("event_data")
+    return event_data if isinstance(event_data, dict) else {}
+
+
+def _split_privileges(value: Optional[str]) -> list[str]:
+    if not value:
+        return []
+    return [part for part in value.replace(",", " ").split() if part]
+
+
+def _extract_privileges(source: Dict[str, Any]) -> list[str]:
+    event_data = _extract_winlog_event_data(source)
+    for key in ("PrivilegeList", "Privileges", "Privilege"):
+        value = _coerce_str(event_data.get(key))
+        if value:
+            return _split_privileges(value)
+    return []
+
+
 def _extract_process(source: Dict[str, Any]) -> Dict[str, Any]:
     process = _get_process_block(source)
     pid = process.get("pid")
@@ -319,6 +359,20 @@ def _missing_required_authentication_fields(raw_event: Dict[str, Any], source: D
     return missing
 
 
+def _missing_required_privilege_fields(raw_event: Dict[str, Any], source: Dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    time_value = _extract_event_time(raw_event, source)
+    if not time_value:
+        missing.append("time")
+    user = _extract_user(source)
+    if not (user.get("uid") or user.get("name")):
+        missing.append("user")
+    privileges = _extract_privileges(source)
+    if not privileges:
+        missing.append("privileges")
+    return missing
+
+
 def _missing_required_process_fields(raw_event: Dict[str, Any], source: Dict[str, Any]) -> list[str]:
     missing: list[str] = []
     time_value = _extract_event_time(raw_event, source)
@@ -404,6 +458,40 @@ def _map_authentication_activity(raw_event: Dict[str, Any], context: MappingCont
     status = _coerce_str(_extract_nested_value(source, ("event", "outcome")))
     if status:
         base["status"] = status
+    return base
+
+
+def _map_windows_security_privilege_use(raw_event: Dict[str, Any], context: MappingContext) -> Optional[Dict[str, Any]]:
+    source = _extract_source(raw_event)
+    missing_fields = _missing_required_privilege_fields(raw_event, source)
+    if missing_fields:
+        return None
+    class_uid = taxonomy.to_class_uid(
+        taxonomy.IAM_CATEGORY_UID,
+        taxonomy.AUTHORIZE_SESSION_ACTIVITY_UID,
+    )
+    activity_id = taxonomy.AUTHORIZE_SESSION_ASSIGN_PRIVILEGES_ID
+    base = _base_event(
+        raw_event,
+        context,
+        category_uid=taxonomy.IAM_CATEGORY_UID,
+        class_uid=class_uid,
+        activity_id=activity_id,
+    )
+    user = _extract_user(source)
+    if user:
+        base["user"] = user
+    privileges = _extract_privileges(source)
+    if privileges:
+        base["privileges"] = privileges
+    event_data = _extract_winlog_event_data(source)
+    logon_id = _coerce_str(event_data.get("SubjectLogonId")) or _coerce_str(event_data.get("LogonId"))
+    if logon_id:
+        base["session"] = {"uid": logon_id}
+    process = _extract_process(source)
+    actor = _build_actor(source, None, process if process else None)
+    if actor:
+        base["actor"] = actor
     return base
 
 
