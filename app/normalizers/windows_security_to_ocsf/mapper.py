@@ -41,6 +41,10 @@ def map_raw_event(raw_event: Dict[str, Any], context: MappingContext) -> Optiona
         return _map_process_termination(raw_event, context)
     if event_id == 4673:
         return _map_privilege_use(raw_event, context)
+    if event_id == 4697:
+        return _map_service_installed(raw_event, context)
+    if event_id == 4698:
+        return _map_scheduled_task_created(raw_event, context)
     return None
 
 
@@ -162,7 +166,7 @@ def _get_system_info(raw_event: Dict[str, Any]) -> Dict[str, str]:
 
 def mapping_attempted(raw_event: Dict[str, Any]) -> bool:
     event_id = _get_event_id(raw_event)
-    return event_id in {4624, 4625, 4673, 4688, 4689}
+    return event_id in {4624, 4625, 4673, 4688, 4689, 4697, 4698}
 
 
 def missing_required_fields(raw_event: Dict[str, Any]) -> list[str]:
@@ -184,6 +188,29 @@ def missing_required_fields(raw_event: Dict[str, Any]) -> list[str]:
             missing.append("SubjectUser")
         if not privileges:
             missing.append("PrivilegeList")
+        return missing
+    if event_id == 4697:
+        event_data = _get_event_data(raw_event)
+        time_value = _get_event_time(raw_event)
+        service_name = _normalize_value(event_data.get("ServiceName"))
+        service_file_name = _normalize_value(event_data.get("ServiceFileName"))
+        missing: list[str] = []
+        if time_value is None:
+            missing.append("Timestamp")
+        if service_name is None:
+            missing.append("ServiceName")
+        if service_file_name is None:
+            missing.append("ServiceFileName")
+        return missing
+    if event_id == 4698:
+        event_data = _get_event_data(raw_event)
+        time_value = _get_event_time(raw_event)
+        task_name = _normalize_value(event_data.get("TaskName"))
+        missing = []
+        if time_value is None:
+            missing.append("Timestamp")
+        if task_name is None:
+            missing.append("TaskName")
         return missing
     if event_id != 4689:
         return []
@@ -503,6 +530,117 @@ def _map_privilege_use(
         if object_server:
             process["object_server"] = object_server
         base.setdefault("unmapped", {})["process"] = process
+
+    return base
+
+
+def _map_service_installed(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+) -> Optional[Dict[str, Any]]:
+    event_data = _get_event_data(raw_event)
+
+    time_value = _get_event_time(raw_event)
+    service_name = _normalize_value(event_data.get("ServiceName"))
+    service_file_name = _normalize_value(event_data.get("ServiceFileName"))
+    if time_value is None or service_name is None or service_file_name is None:
+        return None
+
+    service_type = _normalize_value(event_data.get("ServiceType"))
+    start_type = _normalize_value(event_data.get("StartType"))
+    account_name = _normalize_value(event_data.get("AccountName"))
+
+    process_pid = _to_int(_normalize_value(event_data.get("ProcessId")))
+    process_name = _derive_process_name(service_file_name)
+
+    actor_user = _build_user(
+        sid=_normalize_value(event_data.get("SubjectUserSid")),
+        name=_normalize_value(event_data.get("SubjectUserName")),
+        domain=_normalize_value(event_data.get("SubjectDomainName")),
+    )
+
+    class_uid = taxonomy.to_class_uid(taxonomy.SYSTEM_CATEGORY_UID, taxonomy.PROCESS_ACTIVITY_UID)
+    base = _base_event(
+        raw_event,
+        context,
+        category_uid=taxonomy.SYSTEM_CATEGORY_UID,
+        class_uid=class_uid,
+        activity_id=taxonomy.PROCESS_ACTIVITY_LAUNCH_ID,
+    )
+
+    process: Dict[str, Any] = {"path": service_file_name}
+    if process_name:
+        process["name"] = process_name
+    if process_pid is not None:
+        process["pid"] = process_pid
+
+    base["process"] = process
+    if actor_user:
+        base["actor"] = {"user": actor_user}
+
+    unmapped_service: Dict[str, Any] = {"name": service_name}
+    if start_type:
+        unmapped_service["start_type"] = start_type
+    if service_type:
+        unmapped_service["service_type"] = service_type
+    if account_name:
+        unmapped_service["account"] = account_name
+    base.setdefault("unmapped", {})["service"] = unmapped_service
+
+    return base
+
+
+def _map_scheduled_task_created(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+) -> Optional[Dict[str, Any]]:
+    event_data = _get_event_data(raw_event)
+
+    time_value = _get_event_time(raw_event)
+    task_name = _normalize_value(event_data.get("TaskName"))
+    if time_value is None or task_name is None:
+        return None
+
+    task_xml = _normalize_value(event_data.get("TaskContent"))
+    if task_xml is None:
+        task_xml = _normalize_value(event_data.get("TaskXml"))
+    process_path = _normalize_value(event_data.get("ProcessName"))
+    process_pid = _to_int(_normalize_value(event_data.get("ProcessId")))
+
+    actor_user = _build_user(
+        sid=_normalize_value(event_data.get("SubjectUserSid")),
+        name=_normalize_value(event_data.get("SubjectUserName")),
+        domain=_normalize_value(event_data.get("SubjectDomainName")),
+    )
+
+    class_uid = taxonomy.to_class_uid(taxonomy.SYSTEM_CATEGORY_UID, taxonomy.PROCESS_ACTIVITY_UID)
+    base = _base_event(
+        raw_event,
+        context,
+        category_uid=taxonomy.SYSTEM_CATEGORY_UID,
+        class_uid=class_uid,
+        activity_id=taxonomy.PROCESS_ACTIVITY_LAUNCH_ID,
+    )
+
+    process: Dict[str, Any] = {}
+    if process_path:
+        process["path"] = process_path
+        process_name = _derive_process_name(process_path)
+        if process_name:
+            process["name"] = process_name
+    if process_pid is not None:
+        process["pid"] = process_pid
+
+    base["process"] = process
+    if actor_user:
+        base["actor"] = {"user": actor_user}
+
+    unmapped_task: Dict[str, Any] = {"name": task_name}
+    if task_xml:
+        unmapped_task["xml"] = task_xml
+    if process_path:
+        unmapped_task["command"] = process_path
+    base.setdefault("unmapped", {})["scheduled_task"] = unmapped_task
 
     return base
 
