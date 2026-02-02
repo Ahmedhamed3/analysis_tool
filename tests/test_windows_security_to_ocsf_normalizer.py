@@ -138,6 +138,7 @@ def test_windows_security_4673_json() -> None:
             "PrivilegeList": "SeDebugPrivilege SeTcbPrivilege",
             "ProcessId": "0x1234",
             "ProcessName": "C:\\\\Windows\\\\System32\\\\svchost.exe",
+            "Service": "WinDefend",
         },
         record_id=310,
     )
@@ -156,6 +157,13 @@ def test_windows_security_4673_json() -> None:
     assert ocsf_event["user"]["uid"] == "S-1-5-21-555"
     assert ocsf_event["session"]["uid"] == "0xAAA"
     assert ocsf_event["privileges"] == ["SeDebugPrivilege", "SeTcbPrivilege"]
+    assert "process" not in ocsf_event
+    assert ocsf_event["unmapped"]["process"] == {
+        "pid": 4660,
+        "path": "C:\\\\Windows\\\\System32\\\\svchost.exe",
+        "name": "svchost.exe",
+        "service": "WinDefend",
+    }
 
 
 def test_windows_security_4673_xml() -> None:
@@ -175,6 +183,7 @@ def test_windows_security_4673_xml() -> None:
         <Data Name=\"PrivilegeList\">SeImpersonatePrivilege SeBackupPrivilege</Data>
         <Data Name=\"ProcessId\">9876</Data>
         <Data Name=\"ProcessName\">C:\\\\Windows\\\\System32\\\\lsass.exe</Data>
+        <Data Name=\"ObjectServer\">Security</Data>
       </EventData>
     </Event>
     """.strip()
@@ -198,6 +207,13 @@ def test_windows_security_4673_xml() -> None:
     assert ocsf_event is not None
     assert ocsf_event["user"]["name"] == "riley"
     assert ocsf_event["privileges"] == ["SeImpersonatePrivilege", "SeBackupPrivilege"]
+    assert "process" not in ocsf_event
+    assert ocsf_event["unmapped"]["process"] == {
+        "pid": 9876,
+        "path": "C:\\\\Windows\\\\System32\\\\lsass.exe",
+        "name": "lsass.exe",
+        "object_server": "Security",
+    }
 
 
 def test_windows_security_4673_missing_privileges() -> None:

@@ -110,7 +110,7 @@ def _derive_process_name(path: str) -> Optional[str]:
 def _split_privileges(value: Optional[str]) -> list[str]:
     if not value:
         return []
-    parts = re.split(r"[\\s,]+", value.strip())
+    parts = re.split(r"[\s,]+", value.strip())
     return [part for part in parts if part]
 
 
@@ -487,7 +487,9 @@ def _map_privilege_use(
 
     process_pid = _to_int(_normalize_value(event_data.get("ProcessId")))
     process_path = _normalize_value(event_data.get("ProcessName"))
-    if process_pid is not None or process_path:
+    service_name = _normalize_value(event_data.get("Service"))
+    object_server = _normalize_value(event_data.get("ObjectServer"))
+    if process_pid is not None or process_path or service_name or object_server:
         process: Dict[str, Any] = {}
         if process_pid is not None:
             process["pid"] = process_pid
@@ -496,11 +498,11 @@ def _map_privilege_use(
             process_name = _derive_process_name(process_path)
             if process_name:
                 process["name"] = process_name
+        if service_name:
+            process["service"] = service_name
+        if object_server:
+            process["object_server"] = object_server
         base.setdefault("unmapped", {})["process"] = process
-
-    service_name = _normalize_value(event_data.get("Service"))
-    if service_name:
-        base.setdefault("unmapped", {})["service"] = service_name
 
     return base
 
