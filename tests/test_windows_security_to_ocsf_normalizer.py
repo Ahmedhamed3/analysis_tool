@@ -204,3 +204,90 @@ def test_windows_security_4688_xml() -> None:
     assert ocsf_event["process"]["pid"] == 1536
     assert ocsf_event["process"]["parent_process"]["pid"] == 512
     assert ocsf_event["actor"]["user"]["name"] == "bob"
+
+
+def test_windows_security_4689_json() -> None:
+    raw_event = _build_raw_event(
+        4689,
+        {
+            "SubjectUserSid": "S-1-5-21-777",
+            "SubjectUserName": "carol",
+            "SubjectDomainName": "CONTOSO",
+            "ProcessId": "0x3e8",
+            "ProcessName": "C:\\\\Windows\\\\System32\\\\notepad.exe",
+        },
+        record_id=500,
+    )
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert report["status"] == "valid"
+    assert report["schema_valid"] is True
+    assert ocsf_event is not None
+    assert ocsf_event["activity_id"] == 2
+    assert ocsf_event["type_uid"] == 100702
+    assert ocsf_event["process"]["pid"] == 1000
+    assert ocsf_event["process"]["path"].endswith("notepad.exe")
+    assert ocsf_event["process"]["name"] == "notepad.exe"
+    assert ocsf_event["actor"]["user"]["name"] == "carol"
+
+
+def test_windows_security_4689_xml() -> None:
+    xml_payload = """
+    <Event xmlns=\"http://schemas.microsoft.com/win/2004/08/events/event\">
+      <System>
+        <EventID>4689</EventID>
+        <EventRecordID>501</EventRecordID>
+        <TimeCreated SystemTime=\"2024-01-01T12:03:00.000Z\" />
+        <Computer>WIN-TEST</Computer>
+      </System>
+      <EventData>
+        <Data Name=\"SubjectUserSid\">S-1-5-21-888</Data>
+        <Data Name=\"SubjectUserName\">dave</Data>
+        <Data Name=\"SubjectDomainName\">CONTOSO</Data>
+        <Data Name=\"ProcessId\">1234</Data>
+        <Data Name=\"ProcessName\">C:\\\\Windows\\\\System32\\\\calc.exe</Data>
+      </EventData>
+    </Event>
+    """.strip()
+    raw_event = _build_raw_event(
+        4689,
+        {
+            "SubjectUserSid": "S-1-5-21-888",
+            "SubjectUserName": "dave",
+        },
+        record_id=501,
+    )
+    raw_event["raw"]["format"] = "xml"
+    raw_event["raw"]["data"] = xml_payload
+    raw_event["raw"]["xml"] = xml_payload
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert report["status"] == "valid"
+    assert report["schema_valid"] is True
+    assert ocsf_event is not None
+    assert ocsf_event["process"]["pid"] == 1234
+    assert ocsf_event["process"]["name"] == "calc.exe"
+
+
+def test_windows_security_4689_missing_required_fields() -> None:
+    raw_event = _build_raw_event(
+        4689,
+        {
+            "SubjectUserSid": "S-1-5-21-999",
+            "SubjectUserName": "erin",
+        },
+        record_id=502,
+    )
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert ocsf_event is None
+    assert report["status"] == "unmapped"
+    assert report["supported"] is True
+    assert report["missing_fields"] == ["ProcessId", "ProcessName"]
+    assert "missing required fields" in report["message"]

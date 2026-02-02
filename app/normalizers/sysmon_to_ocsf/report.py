@@ -10,8 +10,10 @@ def build_report(
     supported: bool,
     validation_errors: List[str],
     mapping_attempted: bool = False,
+    missing_fields: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     ids = raw_event.get("ids") or {}
+    missing_fields = missing_fields or []
     report = {
         "record_id": ids.get("record_id"),
         "dedupe_hash": ids.get("dedupe_hash"),
@@ -21,6 +23,9 @@ def build_report(
         "validation_errors": validation_errors,
         "mapped": ocsf_event is not None,
     }
+    if missing_fields:
+        report["missing_fields"] = missing_fields
+        report["message"] = f"Unmapped: missing required fields: {', '.join(missing_fields)}"
     if not supported:
         report["status"] = "unmapped" if mapping_attempted else "unsupported"
     elif ocsf_event is None:

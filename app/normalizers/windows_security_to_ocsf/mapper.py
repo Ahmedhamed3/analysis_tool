@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ntpath
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -35,6 +36,8 @@ def map_raw_event(raw_event: Dict[str, Any], context: MappingContext) -> Optiona
         return _map_authentication_event(raw_event, context, event_id)
     if event_id == 4688:
         return _map_process_activity(raw_event, context)
+    if event_id == 4689:
+        return _map_process_termination(raw_event, context)
     return None
 
 
@@ -94,6 +97,13 @@ def _to_int(value: Optional[str]) -> Optional[int]:
         return None
 
 
+def _derive_process_name(path: str) -> Optional[str]:
+    if not path:
+        return None
+    name = ntpath.basename(path)
+    return name or None
+
+
 def _get_event_data(raw_event: Dict[str, Any]) -> Dict[str, str]:
     parsed = raw_event.get("parsed") or {}
     event_data = parsed.get("event_data")
@@ -134,7 +144,25 @@ def _get_system_info(raw_event: Dict[str, Any]) -> Dict[str, str]:
 
 def mapping_attempted(raw_event: Dict[str, Any]) -> bool:
     event_id = _get_event_id(raw_event)
-    return event_id in {4624, 4625, 4688}
+    return event_id in {4624, 4625, 4688, 4689}
+
+
+def missing_required_fields(raw_event: Dict[str, Any]) -> list[str]:
+    event_id = _get_event_id(raw_event)
+    if event_id != 4689:
+        return []
+    event_data = _get_event_data(raw_event)
+    process_pid = _to_int(_normalize_value(event_data.get("ProcessId")))
+    process_path = _normalize_value(event_data.get("ProcessName"))
+    time_value = _get_event_time(raw_event)
+    missing: list[str] = []
+    if process_pid is None:
+        missing.append("ProcessId")
+    if process_path is None:
+        missing.append("ProcessName")
+    if time_value is None:
+        missing.append("Timestamp")
+    return missing
 
 
 def _base_event(
@@ -337,6 +365,46 @@ def _map_process_activity(
         activity_id=taxonomy.PROCESS_ACTIVITY_LAUNCH_ID,
     )
     base["actor"] = {"user": user}
+    base["process"] = process
+    return base
+
+
+def _map_process_termination(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+) -> Optional[Dict[str, Any]]:
+    event_data = _get_event_data(raw_event)
+
+    process_pid = _to_int(_normalize_value(event_data.get("ProcessId")))
+    process_path = _normalize_value(event_data.get("ProcessName"))
+    time_value = _get_event_time(raw_event)
+    if process_pid is None or process_path is None or time_value is None:
+        return None
+
+    user = _build_user(
+        sid=_normalize_value(event_data.get("SubjectUserSid")),
+        name=_normalize_value(event_data.get("SubjectUserName")),
+        domain=_normalize_value(event_data.get("SubjectDomainName")),
+    )
+    process_name = _derive_process_name(process_path)
+
+    process: Dict[str, Any] = {
+        "pid": process_pid,
+        "path": process_path,
+    }
+    if process_name:
+        process["name"] = process_name
+
+    class_uid = taxonomy.to_class_uid(taxonomy.SYSTEM_CATEGORY_UID, taxonomy.PROCESS_ACTIVITY_UID)
+    base = _base_event(
+        raw_event,
+        context,
+        category_uid=taxonomy.SYSTEM_CATEGORY_UID,
+        class_uid=class_uid,
+        activity_id=taxonomy.PROCESS_ACTIVITY_TERMINATE_ID,
+    )
+    if user:
+        base["actor"] = {"user": user}
     base["process"] = process
     return base
 
