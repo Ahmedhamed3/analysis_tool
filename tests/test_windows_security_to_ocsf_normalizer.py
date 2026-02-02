@@ -125,3 +125,82 @@ def test_windows_security_unsupported_event() -> None:
     assert ocsf_event is None
     assert report["status"] == "unsupported"
     assert report["supported"] is False
+
+
+def test_windows_security_4688_json() -> None:
+    raw_event = _build_raw_event(
+        4688,
+        {
+            "SubjectUserSid": "S-1-5-21-123",
+            "SubjectUserName": "alice",
+            "SubjectDomainName": "CONTOSO",
+            "NewProcessId": "0xABC",
+            "NewProcessName": "C:\\\\Windows\\\\System32\\\\cmd.exe",
+            "CommandLine": "cmd.exe /c whoami",
+            "ProcessId": "0x400",
+            "ParentProcessName": "C:\\\\Windows\\\\explorer.exe",
+        },
+        record_id=400,
+    )
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert report["status"] == "valid"
+    assert report["schema_valid"] is True
+    assert ocsf_event is not None
+    assert ocsf_event["class_uid"] == 1007
+    assert ocsf_event["activity_id"] == 1
+    assert ocsf_event["type_uid"] == 100701
+    assert ocsf_event["process"]["pid"] == 2748
+    assert ocsf_event["process"]["path"].endswith("cmd.exe")
+    assert ocsf_event["process"]["cmd_line"] == "cmd.exe /c whoami"
+    assert ocsf_event["process"]["parent_process"]["pid"] == 1024
+    assert ocsf_event["process"]["parent_process"]["path"].endswith("explorer.exe")
+    assert ocsf_event["actor"]["user"]["name"] == "alice"
+    assert ocsf_event["actor"]["user"]["domain"] == "CONTOSO"
+    assert ocsf_event["device"]["hostname"] == "collector-host"
+
+
+def test_windows_security_4688_xml() -> None:
+    xml_payload = """
+    <Event xmlns=\"http://schemas.microsoft.com/win/2004/08/events/event\">
+      <System>
+        <EventID>4688</EventID>
+        <EventRecordID>401</EventRecordID>
+        <TimeCreated SystemTime=\"2024-01-01T12:02:00.000Z\" />
+        <Computer>WIN-TEST</Computer>
+      </System>
+      <EventData>
+        <Data Name=\"SubjectUserSid\">S-1-5-21-456</Data>
+        <Data Name=\"SubjectUserName\">bob</Data>
+        <Data Name=\"SubjectDomainName\">CONTOSO</Data>
+        <Data Name=\"NewProcessId\">0x600</Data>
+        <Data Name=\"NewProcessName\">C:\\\\Windows\\\\System32\\\\notepad.exe</Data>
+        <Data Name=\"CommandLine\">notepad.exe C:\\\\temp\\\\notes.txt</Data>
+        <Data Name=\"ProcessId\">0x200</Data>
+        <Data Name=\"ParentProcessName\">C:\\\\Windows\\\\System32\\\\cmd.exe</Data>
+      </EventData>
+    </Event>
+    """.strip()
+    raw_event = _build_raw_event(
+        4688,
+        {
+            "SubjectUserSid": "S-1-5-21-456",
+            "SubjectUserName": "bob",
+        },
+        record_id=401,
+    )
+    raw_event["raw"]["format"] = "xml"
+    raw_event["raw"]["data"] = xml_payload
+    raw_event["raw"]["xml"] = xml_payload
+    schema_loader = _schema_loader()
+    ocsf_event, report = next(
+        convert_events([raw_event], schema_loader=schema_loader, strict=False)
+    )
+    assert report["status"] == "valid"
+    assert report["schema_valid"] is True
+    assert ocsf_event is not None
+    assert ocsf_event["process"]["pid"] == 1536
+    assert ocsf_event["process"]["parent_process"]["pid"] == 512
+    assert ocsf_event["actor"]["user"]["name"] == "bob"

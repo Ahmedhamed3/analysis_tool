@@ -34,7 +34,7 @@ def map_raw_event(raw_event: Dict[str, Any], context: MappingContext) -> Optiona
     if event_id in {4624, 4625}:
         return _map_authentication_event(raw_event, context, event_id)
     if event_id == 4688:
-        return None
+        return _map_process_activity(raw_event, context)
     return None
 
 
@@ -87,6 +87,8 @@ def _to_int(value: Optional[str]) -> Optional[int]:
     if value is None:
         return None
     try:
+        if isinstance(value, str):
+            return int(value, 0)
         return int(value)
     except (TypeError, ValueError):
         return None
@@ -128,6 +130,11 @@ def _get_system_info(raw_event: Dict[str, Any]) -> Dict[str, str]:
         return info
     xml = _get_raw_xml(raw_event)
     return parse_system_data(xml) if xml else {}
+
+
+def mapping_attempted(raw_event: Dict[str, Any]) -> bool:
+    event_id = _get_event_id(raw_event)
+    return event_id in {4624, 4625, 4688}
 
 
 def _base_event(
@@ -270,6 +277,67 @@ def _map_authentication_event(
     if process_name:
         base.setdefault("unmapped", {})["process_name"] = process_name
 
+    return base
+
+
+def _map_process_activity(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+) -> Optional[Dict[str, Any]]:
+    event_data = _get_event_data(raw_event)
+    system_info = _get_system_info(raw_event)
+
+    process_pid = _to_int(_normalize_value(event_data.get("NewProcessId")))
+    process_path = _normalize_value(event_data.get("NewProcessName"))
+    process_cmd_line = _normalize_value(event_data.get("CommandLine"))
+
+    parent_pid = _to_int(_normalize_value(event_data.get("ParentProcessId")))
+    if parent_pid is None:
+        parent_pid = _to_int(_normalize_value(event_data.get("ProcessId")))
+    parent_path = _normalize_value(event_data.get("ParentProcessName"))
+    if parent_path is None:
+        parent_path = _normalize_value(event_data.get("ProcessName"))
+
+    user = _build_user(
+        sid=_normalize_value(event_data.get("SubjectUserSid")),
+        name=_normalize_value(event_data.get("SubjectUserName")),
+        domain=_normalize_value(event_data.get("SubjectDomainName")),
+    )
+    hostname = (raw_event.get("host") or {}).get("hostname") or system_info.get("computer")
+    time_value = _get_event_time(raw_event)
+
+    if (
+        process_pid is None
+        or process_path is None
+        or process_cmd_line is None
+        or parent_path is None
+        or not user.get("name")
+        or not user.get("domain")
+        or hostname is None
+        or time_value is None
+    ):
+        return None
+
+    process: Dict[str, Any] = {
+        "pid": process_pid,
+        "path": process_path,
+        "cmd_line": process_cmd_line,
+    }
+    parent_process: Dict[str, Any] = {"path": parent_path}
+    if parent_pid is not None:
+        parent_process["pid"] = parent_pid
+    process["parent_process"] = parent_process
+
+    class_uid = taxonomy.to_class_uid(taxonomy.SYSTEM_CATEGORY_UID, taxonomy.PROCESS_ACTIVITY_UID)
+    base = _base_event(
+        raw_event,
+        context,
+        category_uid=taxonomy.SYSTEM_CATEGORY_UID,
+        class_uid=class_uid,
+        activity_id=taxonomy.PROCESS_ACTIVITY_LAUNCH_ID,
+    )
+    base["actor"] = {"user": user}
+    base["process"] = process
     return base
 
 

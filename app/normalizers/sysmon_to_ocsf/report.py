@@ -9,6 +9,7 @@ def build_report(
     ocsf_event: Optional[Dict[str, Any]],
     supported: bool,
     validation_errors: List[str],
+    mapping_attempted: bool = False,
 ) -> Dict[str, Any]:
     ids = raw_event.get("ids") or {}
     report = {
@@ -21,7 +22,7 @@ def build_report(
         "mapped": ocsf_event is not None,
     }
     if not supported:
-        report["status"] = "unsupported"
+        report["status"] = "unmapped" if mapping_attempted else "unsupported"
     elif ocsf_event is None:
         report["status"] = "unmapped"
     elif validation_errors:
