@@ -6,7 +6,11 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from app.normalizers.sysmon_to_ocsf.report import build_report
 from app.normalizers.sysmon_to_ocsf.validator import OcsfSchemaLoader
-from app.normalizers.windows_security_to_ocsf.mapper import MappingContext, map_raw_event
+from app.normalizers.windows_security_to_ocsf.mapper import (
+    MappingContext,
+    map_raw_event,
+    mapping_attempted,
+)
 
 
 def read_raw_events(path: Path) -> Iterator[Dict[str, Any]]:
@@ -28,6 +32,7 @@ def convert_events(
     for raw_event in raw_events:
         ocsf_event = map_raw_event(raw_event, context)
         supported = ocsf_event is not None
+        attempted = mapping_attempted(raw_event)
         validation_errors: List[str] = []
         if supported and ocsf_event is not None:
             class_path = class_path_for_event(ocsf_event)
@@ -44,6 +49,7 @@ def convert_events(
             ocsf_event=ocsf_event,
             supported=supported,
             validation_errors=validation_errors,
+            mapping_attempted=attempted,
         )
         yield ocsf_event, report
 

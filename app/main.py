@@ -43,6 +43,7 @@ from app.normalizers.windows_security_to_ocsf.io_ndjson import (
 from app.normalizers.windows_security_to_ocsf.mapper import (
     MappingContext as SecurityMappingContext,
     map_raw_event as map_security_raw_event,
+    mapping_attempted as security_mapping_attempted,
 )
 from app.utils.http_status import tail_ndjson
 from app.utils.timeutil import utc_now_iso
@@ -980,6 +981,7 @@ def _build_security_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
     context = SecurityMappingContext(ocsf_version=schema_loader.version)
     ocsf_event = map_security_raw_event(raw_event, context)
     supported = ocsf_event is not None
+    attempted = security_mapping_attempted(raw_event)
     validation_errors: List[str] = []
     if supported and ocsf_event is not None:
         class_path = security_class_path_for_event(ocsf_event)
@@ -994,6 +996,7 @@ def _build_security_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
         ocsf_event=ocsf_event,
         supported=supported,
         validation_errors=validation_errors,
+        mapping_attempted=attempted,
     )
     return {
         "raw_event": raw_event,
