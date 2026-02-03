@@ -37,6 +37,8 @@ def map_raw_event(raw_event: Dict[str, Any], context: MappingContext) -> Optiona
         return _map_process_activity(raw_event, context, decision, missing_fields)
     if decision.family == "network":
         return _map_network_activity(raw_event, context, decision, missing_fields)
+    if decision.family == "elastic_agent":
+        return _map_elastic_agent_error(raw_event, context, decision, missing_fields)
     return _map_generic_activity(raw_event, context, decision, missing_fields)
 
 
@@ -191,6 +193,9 @@ def _detect_family(raw_event: Dict[str, Any], source: Dict[str, Any]) -> FamilyD
             return FamilyDecision("iam", f"event.code={event_code}")
         if event_family is None:
             return FamilyDecision("iam", f"event.code={event_code}")
+    elastic_agent_match = _elastic_agent_match(source)
+    if elastic_agent_match and (event_family is None or event_family.family == "generic"):
+        return FamilyDecision("elastic_agent", elastic_agent_match)
     if event_family is not None:
         return event_family
 
@@ -237,6 +242,20 @@ def _detect_family(raw_event: Dict[str, Any], source: Dict[str, Any]) -> FamilyD
     if _get_registry_block(source):
         return FamilyDecision("registry", "ecs.registry")
     return FamilyDecision("generic", "fallback")
+
+
+def _elastic_agent_match(source: Dict[str, Any]) -> Optional[str]:
+    data_stream = _get_data_stream_block(source)
+    dataset = _coerce_str(data_stream.get("dataset"))
+    if dataset and dataset.lower().startswith("elastic_agent."):
+        return f"data_stream.dataset={dataset}"
+    service_type = _coerce_str(_extract_nested_value(source, ("service", "type")))
+    if service_type and service_type.lower() == "fleet-server":
+        return f"service.type={service_type}"
+    service_name = _coerce_str(_extract_nested_value(source, ("service", "name")))
+    if service_name and service_name.lower() == "fleet-server":
+        return f"service.name={service_name}"
+    return None
 
 
 def _is_windows_security_privilege_use(source: Dict[str, Any]) -> bool:
@@ -295,6 +314,10 @@ def _extract_event_code(source: Dict[str, Any], hit: Dict[str, Any]) -> Optional
     dataset = _coerce_str(event.get("dataset"))
     if dataset:
         return dataset
+    data_stream = _get_data_stream_block(source)
+    data_stream_dataset = _coerce_str(data_stream.get("dataset"))
+    if data_stream_dataset:
+        return data_stream_dataset
     return _coerce_str(hit.get("_index"))
 
 
@@ -624,6 +647,16 @@ def _missing_required_dns_fields(raw_event: Dict[str, Any], source: Dict[str, An
     return missing
 
 
+def _missing_required_elastic_agent_fields(raw_event: Dict[str, Any], source: Dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    time_value = _extract_event_time(raw_event, source)
+    if not time_value:
+        missing.append("time")
+    if not _extract_host_name(source):
+        missing.append("host.name")
+    return missing
+
+
 def _missing_required_fields_for_family(raw_event: Dict[str, Any], source: Dict[str, Any], family: str) -> list[str]:
     if family == "iam":
         if _is_windows_security_group_membership_enumeration(source):
@@ -639,6 +672,8 @@ def _missing_required_fields_for_family(raw_event: Dict[str, Any], source: Dict[
         return _missing_required_process_fields(raw_event, source)
     if family == "network":
         return _missing_required_network_fields(raw_event, source)
+    if family == "elastic_agent":
+        return _missing_required_elastic_agent_fields(raw_event, source)
     return []
 
 
@@ -900,6 +935,37 @@ def _map_dns_activity(
     return base
 
 
+def _map_elastic_agent_error(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+    decision: FamilyDecision,
+    missing_fields: list[str],
+) -> Optional[Dict[str, Any]]:
+    source = _extract_source(raw_event)
+    if missing_fields:
+        return None
+    class_uid = taxonomy.to_class_uid(taxonomy.APPLICATION_CATEGORY_UID, taxonomy.APPLICATION_ERROR_UID)
+    activity_id = taxonomy.APPLICATION_ERROR_GENERAL_ID
+    base = _base_event(
+        raw_event,
+        context,
+        category_uid=taxonomy.APPLICATION_CATEGORY_UID,
+        class_uid=class_uid,
+        activity_id=activity_id,
+        mapping_attempt=_build_mapping_attempt(decision, missing_fields),
+    )
+    message = _coerce_str(_extract_nested_value(source, ("error", "message")))
+    fallback_message = _coerce_str(source.get("message"))
+    if message:
+        base["message"] = message
+    elif fallback_message:
+        base["message"] = fallback_message
+    elastic_agent_unmapped = _build_elastic_agent_unmapped(source, message, fallback_message)
+    if elastic_agent_unmapped:
+        base["unmapped"]["elastic_agent"] = elastic_agent_unmapped
+    return base
+
+
 def _authentication_activity_id(source: Dict[str, Any]) -> int:
     action = _event_action_text(source)
     if action and any(term in action for term in ("logoff", "logout")):
@@ -989,6 +1055,41 @@ def _build_group_membership_unmapped(event_data: Dict[str, Any]) -> Dict[str, An
     if not target_user:
         return {}
     return {"target_user": target_user}
+
+
+def _build_elastic_agent_unmapped(
+    source: Dict[str, Any],
+    error_message: Optional[str],
+    original_message: Optional[str],
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    service_name = _coerce_str(_extract_nested_value(source, ("service", "name")))
+    service_type = _coerce_str(_extract_nested_value(source, ("service", "type")))
+    if service_name or service_type:
+        service: Dict[str, Any] = {}
+        if service_name:
+            service["name"] = service_name
+        if service_type:
+            service["type"] = service_type
+        payload["service"] = service
+    component_block = _extract_nested_value(source, ("component",))
+    if isinstance(component_block, dict):
+        component_payload: Dict[str, Any] = {}
+        component_id = _coerce_str(component_block.get("id"))
+        component_binary = _coerce_str(component_block.get("binary"))
+        if component_id:
+            component_payload["id"] = component_id
+        if component_binary:
+            component_payload["binary"] = component_binary
+        if component_payload:
+            payload["component"] = component_payload
+    if error_message and original_message and error_message != original_message:
+        payload["message"] = original_message
+    elif not error_message and original_message:
+        payload["message"] = original_message
+    if error_message and (not original_message or error_message != original_message):
+        payload["error_message"] = error_message
+    return payload
 
 
 def _base_event(

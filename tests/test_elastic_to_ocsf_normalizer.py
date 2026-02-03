@@ -268,6 +268,93 @@ def test_elastic_generic_mapping_schema_valid() -> None:
     assert result.valid, result.errors
 
 
+def test_elastic_agent_fleet_server_error_mapping_schema_valid() -> None:
+    hit = {
+        "_index": "logs-elastic_agent.fleet_server-default",
+        "_id": "fleet-err-1",
+        "_source": {
+            "@timestamp": "2024-06-01T11:50:00Z",
+            "data_stream": {"dataset": "elastic_agent.fleet_server"},
+            "service": {"name": "fleet-server", "type": "fleet-server"},
+            "component": {"binary": "fleet-server", "id": "fleet-server"},
+            "log": {"level": "error"},
+            "message": "Fleet Server failed",
+            "error": {"message": "Access is denied."},
+            "host": {"name": "desktop-4urheac"},
+        },
+    }
+    schema_loader, context = build_context()
+    raw_event = build_raw_event(hit)
+
+    mapped = map_raw_event(raw_event, context)
+
+    assert mapped is not None
+    assert mapped["category_uid"] == 6
+    assert mapped["class_uid"] == 6008
+    assert mapped["activity_id"] == 1
+    assert mapped["type_uid"] != 0
+    assert mapped["severity_id"] == 4
+    assert mapped["message"] == "Access is denied."
+    assert mapped["device"]["hostname"] == "desktop-4urheac"
+    assert mapped["metadata"]["event_code"] == "elastic_agent.fleet_server"
+    class_path = class_path_for_event(mapped)
+    assert class_path == "application/application_error"
+    result = schema_loader.validate_event(mapped, class_path)
+    assert result.valid, result.errors
+
+
+def test_elastic_agent_fleet_server_mapping_is_deterministic() -> None:
+    schema_loader, context = build_context()
+    hit = {
+        "_index": "logs-elastic_agent.fleet_server-default",
+        "_id": "fleet-err-dedupe",
+        "_source": {
+            "@timestamp": "2024-06-01T11:49:00Z",
+            "data_stream": {"dataset": "elastic_agent.fleet_server"},
+            "service": {"name": "fleet-server", "type": "fleet-server"},
+            "log": {"level": "error"},
+            "message": "Fleet Server failed",
+            "error": {"message": "Access is denied."},
+            "host": {"name": "desktop-4urheac"},
+        },
+    }
+    raw_event = build_raw_event(hit)
+
+    first = map_raw_event(raw_event, context)
+    second = map_raw_event(raw_event, context)
+
+    assert first is not None
+    assert first == second
+    class_path = class_path_for_event(first)
+    result = schema_loader.validate_event(first, class_path)
+    assert result.valid, result.errors
+
+
+def test_elastic_agent_missing_required_fields_reported() -> None:
+    hit = {
+        "_index": "logs-elastic_agent.fleet_server-default",
+        "_id": "fleet-missing",
+        "_source": {
+            "data_stream": {"dataset": "elastic_agent.fleet_server"},
+            "service": {"name": "fleet-server"},
+            "log": {"level": "error"},
+            "message": "Fleet Server failed",
+        },
+    }
+    schema_loader, _ = build_context()
+    raw_event = build_raw_event(hit)
+    raw_event["event"] = {}
+
+    results = list(convert_events([raw_event], schema_loader=schema_loader, strict=False))
+
+    assert results
+    mapped, report = results[0]
+    assert mapped is None
+    assert report["status"] == "unmapped"
+    assert "time" in report.get("missing_fields", [])
+    assert "host.name" in report.get("missing_fields", [])
+
+
 def test_elastic_authentication_missing_required_fields_reported() -> None:
     hit = {
         "_index": "logs-auth-default",
