@@ -12,6 +12,7 @@ from app.normalizers.windows_security_to_ocsf.mapper import (
     mapping_attempted,
     missing_required_fields,
 )
+from app.utils.evidence_hashing import apply_evidence_hashing
 
 
 def read_raw_events(path: Path) -> Iterator[Dict[str, Any]]:
@@ -36,6 +37,7 @@ def convert_events(
         supported = attempted
         missing_fields = missing_required_fields(raw_event)
         validation_errors: List[str] = []
+        evidence_commit = None
         if supported and ocsf_event is not None:
             class_path = class_path_for_event(ocsf_event)
             if class_path:
@@ -43,6 +45,15 @@ def convert_events(
                 validation_errors = result.errors
                 if strict and not result.valid:
                     ocsf_event = None
+                else:
+                    hash_result = apply_evidence_hashing(
+                        raw_event,
+                        ocsf_event,
+                        ocsf_schema=class_path,
+                        ocsf_version=context.ocsf_version,
+                    )
+                    ocsf_event = hash_result.ocsf_event
+                    evidence_commit = hash_result.evidence_commit
             else:
                 supported = False
                 ocsf_event = None
@@ -54,6 +65,8 @@ def convert_events(
             mapping_attempted=attempted,
             missing_fields=missing_fields,
         )
+        if evidence_commit is not None:
+            report["evidence_commit"] = evidence_commit
         yield ocsf_event, report
 
 

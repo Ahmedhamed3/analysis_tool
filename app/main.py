@@ -61,6 +61,7 @@ from app.normalizers.windows_security_to_ocsf.mapper import (
     missing_required_fields as security_missing_required_fields,
 )
 from app.utils.http_status import tail_ndjson
+from app.utils.evidence_hashing import apply_evidence_hashing
 from app.utils.timeutil import utc_now_iso
 
 app = FastAPI(
@@ -976,11 +977,23 @@ def _build_sysmon_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
     supported = attempted
     missing_fields = missing_required_fields(raw_event)
     validation_errors: List[str] = []
+    evidence_commit = None
+    raw_event_output = raw_event
     if supported and ocsf_event is not None:
         class_path = class_path_for_event(ocsf_event)
         if class_path:
             validation = schema_loader.validate_event(ocsf_event, class_path)
             validation_errors = validation.errors
+            if not validation.errors:
+                hash_result = apply_evidence_hashing(
+                    raw_event,
+                    ocsf_event,
+                    ocsf_schema=class_path,
+                    ocsf_version=context.ocsf_version,
+                )
+                raw_event_output = hash_result.raw_envelope
+                ocsf_event = hash_result.ocsf_event
+                evidence_commit = hash_result.evidence_commit
         else:
             supported = False
             ocsf_event = None
@@ -994,10 +1007,13 @@ def _build_sysmon_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
         mapping_attempted=attempted,
         missing_fields=missing_fields,
     )
+    if evidence_commit is not None:
+        report["evidence_commit"] = evidence_commit
     return {
-        "raw_event": raw_event,
+        "raw_event": raw_event_output,
         "ocsf_event": ocsf_event,
         "report": report,
+        "evidence_commit": evidence_commit,
     }
 
 
@@ -1009,11 +1025,23 @@ def _build_security_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
     supported = attempted
     missing_fields = security_missing_required_fields(raw_event)
     validation_errors: List[str] = []
+    evidence_commit = None
+    raw_event_output = raw_event
     if supported and ocsf_event is not None:
         class_path = security_class_path_for_event(ocsf_event)
         if class_path:
             validation = schema_loader.validate_event(ocsf_event, class_path)
             validation_errors = validation.errors
+            if not validation.errors:
+                hash_result = apply_evidence_hashing(
+                    raw_event,
+                    ocsf_event,
+                    ocsf_schema=class_path,
+                    ocsf_version=context.ocsf_version,
+                )
+                raw_event_output = hash_result.raw_envelope
+                ocsf_event = hash_result.ocsf_event
+                evidence_commit = hash_result.evidence_commit
         else:
             supported = False
             ocsf_event = None
@@ -1025,10 +1053,13 @@ def _build_security_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
         mapping_attempted=attempted,
         missing_fields=missing_fields,
     )
+    if evidence_commit is not None:
+        report["evidence_commit"] = evidence_commit
     return {
-        "raw_event": raw_event,
+        "raw_event": raw_event_output,
         "ocsf_event": ocsf_event,
         "report": report,
+        "evidence_commit": evidence_commit,
     }
 
 
@@ -1040,11 +1071,23 @@ def _build_elastic_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
     supported = attempted
     missing_fields = elastic_missing_required_fields(raw_event)
     validation_errors: List[str] = []
+    evidence_commit = None
+    raw_event_output = raw_event
     if supported and ocsf_event is not None:
         class_path = elastic_class_path_for_event(ocsf_event)
         if class_path:
             validation = schema_loader.validate_event(ocsf_event, class_path)
             validation_errors = validation.errors
+            if not validation.errors:
+                hash_result = apply_evidence_hashing(
+                    raw_event,
+                    ocsf_event,
+                    ocsf_schema=class_path,
+                    ocsf_version=context.ocsf_version,
+                )
+                raw_event_output = hash_result.raw_envelope
+                ocsf_event = hash_result.ocsf_event
+                evidence_commit = hash_result.evidence_commit
         else:
             supported = False
             ocsf_event = None
@@ -1056,10 +1099,13 @@ def _build_elastic_ocsf_payload(raw_event: Dict[str, Any]) -> Dict[str, Any]:
         mapping_attempted=attempted,
         missing_fields=missing_fields,
     )
+    if evidence_commit is not None:
+        report["evidence_commit"] = evidence_commit
     return {
-        "raw_event": raw_event,
+        "raw_event": raw_event_output,
         "ocsf_event": ocsf_event,
         "report": report,
+        "evidence_commit": evidence_commit,
     }
 
 
