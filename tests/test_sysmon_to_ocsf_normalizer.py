@@ -160,7 +160,7 @@ def test_sysmon_mapping_is_deterministic() -> None:
     mapped_second = map_raw_event(raw_event, context)
     assert mapped_first == mapped_second
     assert mapped_first is not None
-    assert mapped_first["metadata"]["uid"] == "sha256:three"
+    assert mapped_first["metadata"]["original_event_uid"] == "125"
     hashes = {entry["algorithm_id"]: entry["value"] for entry in mapped_first["file"]["hashes"]}
     assert hashes[3].startswith("c")
     assert hashes[1].startswith("d")

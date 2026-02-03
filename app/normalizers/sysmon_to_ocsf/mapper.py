@@ -149,13 +149,12 @@ def _base_event(raw_event: Dict[str, Any], context: MappingContext, *, category_
         "version": source.get("version"),
     }
     product = {key: value for key, value in product.items() if value}
-    # metadata.uid is the source event identifier; dedupe_hash is only for restart safety.
+    # metadata.uid is assigned after hashing to a stable OCSF event hash.
     metadata = {
         "product": product,
         "version": context.ocsf_version,
         "event_code": str(event_code) if event_code is not None else None,
         "original_event_uid": str(record_id) if record_id is not None else None,
-        "uid": str(record_id) if record_id is not None else None,
         "log_name": channel,
         "log_source": source.get("type"),
         "log_format": "xml",

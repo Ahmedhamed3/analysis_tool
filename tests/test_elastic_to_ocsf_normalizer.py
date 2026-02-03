@@ -460,7 +460,7 @@ def test_elastic_agent_dataset_mapping_is_deterministic() -> None:
 
     assert first is not None
     assert second is not None
-    assert first["metadata"]["uid"] == second["metadata"]["uid"]
+    assert first["metadata"]["original_event_uid"] == second["metadata"]["original_event_uid"]
     results = list(convert_events([raw_event, raw_event], schema_loader=schema_loader, strict=False))
     assert results[0][1]["record_id"] == results[1][1]["record_id"]
 

@@ -174,6 +174,13 @@ envelope, OCSF (when supported), and the validation/mapping report.
    ```
 3) Confirm it matches `ids.dedupe_hash`.
 
+### Identity Fields: evidence_id vs dedupe_hash vs metadata.uid
+
+- `ids.dedupe_hash`: ingestion deduplication and restart safety for raw collection.
+- `evidence_id`: primary evidence identity used for custody tracking and blockchain anchoring.
+- `metadata.original_event_uid`: the source system's record identifier (for example, a Sysmon Record ID).
+- `metadata.uid`: the SHA-256 of the canonicalized OCSF JSON, formatted as `sha256:<ocsf_hash>`.
+
 ## Windows Security Direct Endpoint Connector
 
 This repository includes a Windows Security connector that continuously exports raw Security events (no OCSF normalization) to NDJSON and maintains a checkpoint to avoid duplicates.
