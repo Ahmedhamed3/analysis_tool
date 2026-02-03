@@ -192,13 +192,125 @@ def test_evidence_hashing_regression_sysmon_windows_elastic() -> None:
     assert security_result.raw_envelope["derived"]["ocsf_event_hash"] == security_result.evidence_commit["ocsf"]["hash_sha256"]
     assert elastic_result.raw_envelope["derived"]["ocsf_event_hash"] == elastic_result.evidence_commit["ocsf"]["hash_sha256"]
 
-    assert sysmon_result.ocsf_event["forensics"]["raw_envelope_hash"] == sysmon_result.evidence_commit["raw_envelope"]["hash_sha256"]
-    assert security_result.ocsf_event["forensics"]["raw_envelope_hash"] == security_result.evidence_commit["raw_envelope"]["hash_sha256"]
-    assert elastic_result.ocsf_event["forensics"]["raw_envelope_hash"] == elastic_result.evidence_commit["raw_envelope"]["hash_sha256"]
+    assert sysmon_result.ocsf_event["forensics"]["raw_envelope_hash"] == sysmon_result.evidence_commit["raw"]["envelope"]["hash_sha256"]
+    assert security_result.ocsf_event["forensics"]["raw_envelope_hash"] == security_result.evidence_commit["raw"]["envelope"]["hash_sha256"]
+    assert elastic_result.ocsf_event["forensics"]["raw_envelope_hash"] == elastic_result.evidence_commit["raw"]["envelope"]["hash_sha256"]
 
-    assert sysmon_result.evidence_commit["raw_envelope"]["hash_sha256"] == "e2ed1a5c33d797113624efeb5a1983a1100af20b8cb576127f928933c75a2bf2"
-    assert sysmon_result.evidence_commit["ocsf"]["hash_sha256"] == "d74f9cfa85a69d4b83ca9b806a58c7dbf5b2edf9e09741e6aa29bd51f18b91aa"
-    assert security_result.evidence_commit["raw_envelope"]["hash_sha256"] == "4dd4d225d5cf6d858031a31d826fca92c6e09540519da1d91d9eb2c11120a11d"
-    assert security_result.evidence_commit["ocsf"]["hash_sha256"] == "1bc6129c8cd1d79e44c3716c29596b5b5c634ff7c1e3f5f13bd66c3f4f68e3f3"
-    assert elastic_result.evidence_commit["raw_envelope"]["hash_sha256"] == "c17ff2418de6101acd7c368ad2eab31b6055840b30d8936123d05d6f305372a3"
-    assert elastic_result.evidence_commit["ocsf"]["hash_sha256"] == "c0b0faf8ca8d12e0db8fe5d9b77abf1eb64b98d5d71533df82b0b67390173c14"
+    assert sysmon_result.evidence_commit["raw"]["envelope"]["hash_sha256"] == "6ee52ed5f1c7fe1dabaa44d0781f551741fae9867728f5b20873e485ee50b96d"
+    assert sysmon_result.evidence_commit["raw"]["payload"]["hash_sha256"] == "148c9c0ff64e499bbce35e3b5d422f9a772c97f17630f81861b4a081438e929d"
+    assert sysmon_result.evidence_commit["ocsf"]["hash_sha256"] == "310f20d6a470f323ef2a472b2a785e8ba6259dbc56d245190ca9cff394223aeb"
+    assert security_result.evidence_commit["raw"]["envelope"]["hash_sha256"] == "b87635a60a12b0e10d8df1d837ef32e6f4ce52c52dc7ed102ed06dbc1a18561f"
+    assert security_result.evidence_commit["raw"]["payload"]["hash_sha256"] == "216b4c66436f2a476d6235a0faca54c27d7039681eaae5f13aca903116a03a60"
+    assert security_result.evidence_commit["ocsf"]["hash_sha256"] == "39de6b22a801fe46303db4c61db9f7b74b68b519b0fd267cbeb364f374cf3a50"
+    assert elastic_result.evidence_commit["raw"]["envelope"]["hash_sha256"] == "b65837c0dc4f3653ebfce4473c1930d20e5254940fbbdf9e93814487f5c3c7a1"
+    assert elastic_result.evidence_commit["raw"]["payload"]["hash_sha256"] == "8743d406ab512cbcfc123ea427f9167c4f0df9a58d954a5c8814f9a11247a664"
+    assert elastic_result.evidence_commit["ocsf"]["hash_sha256"] == "d829afd3df4ed21573c577da1be4be035957dccbc52a6241e1f8acfcd4933d88"
+
+
+def test_envelope_and_payload_hashes_are_deterministic() -> None:
+    raw_event = _build_sysmon_raw_event()
+    schema_loader = _schema_loader()
+    context = SysmonMappingContext(ocsf_version=schema_loader.version)
+    ocsf_event = map_sysmon_raw_event(raw_event, context)
+    assert ocsf_event is not None
+
+    first = apply_evidence_hashing(
+        raw_event,
+        ocsf_event,
+        ocsf_schema="system/process_activity",
+        ocsf_version=schema_loader.version,
+        hashed_utc="2024-01-01T00:00:00Z",
+    )
+    second = apply_evidence_hashing(
+        raw_event,
+        ocsf_event,
+        ocsf_schema="system/process_activity",
+        ocsf_version=schema_loader.version,
+        hashed_utc="2024-01-01T00:00:00Z",
+    )
+
+    assert first.evidence_commit["raw"]["envelope"]["hash_sha256"] == second.evidence_commit["raw"]["envelope"]["hash_sha256"]
+    assert first.evidence_commit["raw"]["payload"]["hash_sha256"] == second.evidence_commit["raw"]["payload"]["hash_sha256"]
+
+
+def test_envelope_hash_ignores_key_order() -> None:
+    raw_event = _build_sysmon_raw_event()
+    reordered = dict(reversed(list(raw_event.items())))
+    schema_loader = _schema_loader()
+    context = SysmonMappingContext(ocsf_version=schema_loader.version)
+    ocsf_event = map_sysmon_raw_event(raw_event, context)
+    assert ocsf_event is not None
+
+    original = apply_evidence_hashing(
+        raw_event,
+        ocsf_event,
+        ocsf_schema="system/process_activity",
+        ocsf_version=schema_loader.version,
+        hashed_utc="2024-01-01T00:00:00Z",
+    )
+    updated = apply_evidence_hashing(
+        reordered,
+        ocsf_event,
+        ocsf_schema="system/process_activity",
+        ocsf_version=schema_loader.version,
+        hashed_utc="2024-01-01T00:00:00Z",
+    )
+
+    assert original.evidence_commit["raw"]["envelope"]["hash_sha256"] == updated.evidence_commit["raw"]["envelope"]["hash_sha256"]
+
+
+def test_payload_change_updates_payload_and_envelope_hashes() -> None:
+    raw_event = _build_sysmon_raw_event()
+    schema_loader = _schema_loader()
+    context = SysmonMappingContext(ocsf_version=schema_loader.version)
+    ocsf_event = map_sysmon_raw_event(raw_event, context)
+    assert ocsf_event is not None
+
+    original = apply_evidence_hashing(
+        raw_event,
+        ocsf_event,
+        ocsf_schema="system/process_activity",
+        ocsf_version=schema_loader.version,
+        hashed_utc="2024-01-01T00:00:00Z",
+    )
+    updated_raw = _build_sysmon_raw_event()
+    updated_raw["raw"]["data"] = SYS_MON_XML.replace("cmd.exe /c whoami", "cmd.exe /c hostname")
+    updated_raw["raw"]["xml"] = updated_raw["raw"]["data"]
+    updated = apply_evidence_hashing(
+        updated_raw,
+        ocsf_event,
+        ocsf_schema="system/process_activity",
+        ocsf_version=schema_loader.version,
+        hashed_utc="2024-01-01T00:00:00Z",
+    )
+
+    assert original.evidence_commit["raw"]["payload"]["hash_sha256"] != updated.evidence_commit["raw"]["payload"]["hash_sha256"]
+    assert original.evidence_commit["raw"]["envelope"]["hash_sha256"] != updated.evidence_commit["raw"]["envelope"]["hash_sha256"]
+
+
+def test_evidence_id_strategy_is_consistent() -> None:
+    raw_event = _build_sysmon_raw_event()
+    schema_loader = _schema_loader()
+    context = SysmonMappingContext(ocsf_version=schema_loader.version)
+    ocsf_event = map_sysmon_raw_event(raw_event, context)
+    assert ocsf_event is not None
+
+    first = apply_evidence_hashing(
+        raw_event,
+        ocsf_event,
+        ocsf_schema="system/process_activity",
+        ocsf_version=schema_loader.version,
+        hashed_utc="2024-01-01T00:00:00Z",
+    )
+    second = apply_evidence_hashing(
+        raw_event,
+        ocsf_event,
+        ocsf_schema="system/process_activity",
+        ocsf_version=schema_loader.version,
+        hashed_utc="2024-01-01T00:00:00Z",
+    )
+    evidence_id = first.evidence_commit["evidence_id"]
+    if evidence_id.startswith("uuidv7:"):
+        assert evidence_id != second.evidence_commit["evidence_id"]
+    else:
+        assert evidence_id == second.evidence_commit["evidence_id"]

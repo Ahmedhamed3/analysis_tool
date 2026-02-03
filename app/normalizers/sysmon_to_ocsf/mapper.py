@@ -140,7 +140,6 @@ def _base_event(raw_event: Dict[str, Any], context: MappingContext, *, category_
     host = raw_event.get("host") or {}
     time_value = _get_event_time(raw_event)
     record_id = ids.get("record_id")
-    dedupe_hash = ids.get("dedupe_hash")
     event_code = ids.get("event_id")
     channel = source.get("channel")
     product_name = source.get("product") or "sysmon"
@@ -150,12 +149,13 @@ def _base_event(raw_event: Dict[str, Any], context: MappingContext, *, category_
         "version": source.get("version"),
     }
     product = {key: value for key, value in product.items() if value}
+    # metadata.uid is the source event identifier; dedupe_hash is only for restart safety.
     metadata = {
         "product": product,
         "version": context.ocsf_version,
         "event_code": str(event_code) if event_code is not None else None,
         "original_event_uid": str(record_id) if record_id is not None else None,
-        "uid": dedupe_hash,
+        "uid": str(record_id) if record_id is not None else None,
         "log_name": channel,
         "log_source": source.get("type"),
         "log_format": "xml",
