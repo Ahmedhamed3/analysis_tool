@@ -17,6 +17,12 @@ def build_raw_event(hit: dict) -> dict:
     )
 
 
+def build_context() -> tuple[OcsfSchemaLoader, MappingContext]:
+    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
+    context = MappingContext(ocsf_version=schema_loader.version)
+    return schema_loader, context
+
+
 def test_elastic_authentication_mapping_schema_valid() -> None:
     hit = {
         "_index": "logs-auth-default",
@@ -31,11 +37,11 @@ def test_elastic_authentication_mapping_schema_valid() -> None:
             },
             "user": {"name": "alice", "id": "1001"},
             "source": {"ip": "10.0.0.10", "port": 51515},
+            "destination": {"ip": "10.0.0.20", "port": 443},
             "host": {"name": "auth-host"},
         },
     }
-    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
-    context = MappingContext(ocsf_version=schema_loader.version)
+    schema_loader, context = build_context()
     raw_event = build_raw_event(hit)
 
     mapped = map_raw_event(raw_event, context)
@@ -65,8 +71,7 @@ def test_elastic_network_mapping_schema_valid() -> None:
             "destination": {"ip": "10.0.0.30", "port": 443},
         },
     }
-    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
-    context = MappingContext(ocsf_version=schema_loader.version)
+    schema_loader, context = build_context()
     raw_event = build_raw_event(hit)
 
     mapped = map_raw_event(raw_event, context)
@@ -96,8 +101,7 @@ def test_elastic_process_mapping_schema_valid() -> None:
             "host": {"name": "endpoint-1"},
         },
     }
-    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
-    context = MappingContext(ocsf_version=schema_loader.version)
+    schema_loader, context = build_context()
     raw_event = build_raw_event(hit)
 
     mapped = map_raw_event(raw_event, context)
@@ -137,8 +141,7 @@ def test_elastic_windows_security_4673_mapping_schema_valid() -> None:
             "host": {"name": "win-host-01"},
         },
     }
-    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
-    context = MappingContext(ocsf_version=schema_loader.version)
+    schema_loader, context = build_context()
     raw_event = build_raw_event(hit)
 
     mapped = map_raw_event(raw_event, context)
@@ -155,6 +158,89 @@ def test_elastic_windows_security_4673_mapping_schema_valid() -> None:
     assert mapped["actor"]["process"]["name"] == "backup.exe"
     assert mapped["actor"]["process"]["path"] == "C:\\Windows\\System32\\backup.exe"
     assert mapped["unmapped"]["elastic"]["_source"] == hit["_source"]
+    assert "elastic_source" not in mapped["unmapped"]
+    result = schema_loader.validate_event(mapped, class_path)
+    assert result.valid, result.errors
+
+
+def test_elastic_windows_security_4798_mapping_schema_valid() -> None:
+    hit = {
+        "_index": "logs-windows.security-default",
+        "_id": "winsec-4798",
+        "_source": {
+            "@timestamp": "2024-06-01T11:53:00Z",
+            "event": {
+                "category": ["iam"],
+                "code": "4798",
+                "outcome": "success",
+            },
+            "winlog": {
+                "channel": "Security",
+                "event_data": {
+                    "SubjectUserName": "admin",
+                    "SubjectDomainName": "CORP",
+                    "SubjectUserSid": "S-1-5-21-2000",
+                    "CallerProcessName": "C:\\Windows\\System32\\net.exe",
+                    "CallerProcessId": "1234",
+                    "TargetUserName": "bob",
+                    "TargetDomainName": "CORP",
+                    "GroupName": "Administrators",
+                },
+            },
+            "host": {"name": "win-host-02"},
+        },
+    }
+    schema_loader, context = build_context()
+    raw_event = build_raw_event(hit)
+
+    mapped = map_raw_event(raw_event, context)
+
+    assert mapped is not None
+    assert mapped["class_uid"] == 3004
+    assert mapped["activity_id"] == 2
+    class_path = class_path_for_event(mapped)
+    assert class_path == "iam/entity_management"
+    assert "dst_endpoint" not in mapped
+    assert mapped["actor"]["user"]["name"] == "admin"
+    assert mapped["actor"]["process"]["name"] == "net.exe"
+    assert mapped["entity"]["name"] == "Administrators"
+    assert "mapping_note" in mapped["unmapped"]
+    assert mapped["unmapped"]["event_data"]["target_user"]["name"] == "bob"
+    result = schema_loader.validate_event(mapped, class_path)
+    assert result.valid, result.errors
+
+
+def test_elastic_dns_mapping_schema_valid() -> None:
+    hit = {
+        "_index": "logs-dns-default",
+        "_id": "dns-1",
+        "_source": {
+            "@timestamp": "2024-06-01T11:52:00Z",
+            "event": {"category": ["network"], "action": "dns_query"},
+            "network": {"transport": "udp"},
+            "source": {"ip": "10.0.0.40", "port": 5353},
+            "destination": {"ip": "10.0.0.53", "port": 53},
+            "dns": {
+                "question": {"name": "example.com"},
+                "answers": [
+                    {"data": "93.184.216.34", "type": "A", "ttl": 60},
+                ],
+                "response_code": "NOERROR",
+            },
+        },
+    }
+    schema_loader, context = build_context()
+    raw_event = build_raw_event(hit)
+
+    mapped = map_raw_event(raw_event, context)
+
+    assert mapped is not None
+    assert mapped["class_uid"] == 4003
+    assert mapped["activity_id"] == 1
+    class_path = class_path_for_event(mapped)
+    assert class_path == "network/dns_activity"
+    assert mapped["query"]["hostname"] == "example.com"
+    assert mapped["answers"][0]["rdata"] == "93.184.216.34"
     result = schema_loader.validate_event(mapped, class_path)
     assert result.valid, result.errors
 
@@ -168,8 +254,7 @@ def test_elastic_generic_mapping_schema_valid() -> None:
             "message": "Unclassified event",
         },
     }
-    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
-    context = MappingContext(ocsf_version=schema_loader.version)
+    schema_loader, context = build_context()
     raw_event = build_raw_event(hit)
 
     mapped = map_raw_event(raw_event, context)
@@ -193,7 +278,7 @@ def test_elastic_authentication_missing_required_fields_reported() -> None:
             "host": {"name": "auth-host"},
         },
     }
-    schema_loader = OcsfSchemaLoader(Path("app/ocsf_schema"))
+    schema_loader, _ = build_context()
     raw_event = build_raw_event(hit)
 
     results = list(
@@ -202,6 +287,79 @@ def test_elastic_authentication_missing_required_fields_reported() -> None:
 
     assert results
     mapped, report = results[0]
-    assert mapped is None
-    assert report["status"] == "unmapped"
+    assert mapped is not None
+    assert mapped["class_uid"] == 0
+    assert report["status"] == "valid"
     assert "user" in report.get("missing_fields", [])
+    assert "dst_endpoint/service" in report.get("missing_fields", [])
+
+
+def test_elastic_missing_required_fields_for_each_family() -> None:
+    schema_loader, context = build_context()
+    samples = [
+        {
+            "_id": "auth-missing",
+            "_source": {"event": {"category": ["authentication"], "action": "login"}},
+            "expected_missing": "user",
+        },
+        {
+            "_id": "proc-missing",
+            "_source": {"event": {"category": ["process"], "action": "start"}, "host": {"name": "host-a"}},
+            "expected_missing": "process.pid/process.uid",
+        },
+        {
+            "_id": "net-missing",
+            "_source": {
+                "event": {"category": ["network"], "action": "connection"},
+                "network": {"transport": "tcp"},
+                "source": {"ip": "10.0.0.1", "port": 1234},
+            },
+            "expected_missing": "destination.ip",
+        },
+        {
+            "_id": "dns-missing",
+            "_source": {"event": {"category": ["network"], "action": "dns_query"}},
+            "expected_missing": "dns.question.name",
+        },
+        {
+            "_id": "iam-missing",
+            "_source": {
+                "event": {"code": "4673"},
+                "winlog": {"channel": "Security", "event_data": {}},
+            },
+            "expected_missing": "privileges",
+        },
+    ]
+
+    for sample in samples:
+        hit = {"_index": "logs-test", "_id": sample["_id"], "_source": sample["_source"]}
+        raw_event = build_raw_event(hit)
+        mapped = map_raw_event(raw_event, context)
+        assert mapped is not None
+        assert mapped["class_uid"] == 0
+        report = list(convert_events([raw_event], schema_loader=schema_loader, strict=False))[0][1]
+        assert sample["expected_missing"] in report.get("missing_fields", [])
+
+
+def test_elastic_mapping_is_deterministic() -> None:
+    schema_loader, context = build_context()
+    hit = {
+        "_index": "logs-network-default",
+        "_id": "net-deterministic",
+        "_source": {
+            "@timestamp": "2024-06-01T11:40:00Z",
+            "event": {"category": ["network"], "action": "connection"},
+            "network": {"transport": "tcp"},
+            "source": {"ip": "10.0.0.20", "port": 12345},
+            "destination": {"ip": "10.0.0.30", "port": 443},
+        },
+    }
+    raw_event = build_raw_event(hit)
+
+    first = map_raw_event(raw_event, context)
+    second = map_raw_event(raw_event, context)
+
+    assert first == second
+    class_path = class_path_for_event(first)
+    result = schema_loader.validate_event(first, class_path)
+    assert result.valid, result.errors
