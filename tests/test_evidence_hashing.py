@@ -188,6 +188,17 @@ def test_evidence_hashing_regression_sysmon_windows_elastic() -> None:
         hashed_utc="2024-01-01T00:00:00Z",
     )
 
+    assert sysmon_result.ocsf_event["metadata"]["original_event_uid"] == "123"
+    assert security_result.ocsf_event["metadata"]["original_event_uid"] == "200"
+    assert elastic_result.ocsf_event["metadata"]["original_event_uid"] == "doc-1"
+
+    assert sysmon_result.ocsf_event["metadata"]["uid"].startswith("sha256:")
+    assert security_result.ocsf_event["metadata"]["uid"].startswith("sha256:")
+    assert elastic_result.ocsf_event["metadata"]["uid"].startswith("sha256:")
+    assert sysmon_result.ocsf_event["metadata"]["uid"] == f"sha256:{sysmon_result.evidence_commit['ocsf']['hash_sha256']}"
+    assert security_result.ocsf_event["metadata"]["uid"] == f"sha256:{security_result.evidence_commit['ocsf']['hash_sha256']}"
+    assert elastic_result.ocsf_event["metadata"]["uid"] == f"sha256:{elastic_result.evidence_commit['ocsf']['hash_sha256']}"
+
     assert sysmon_result.raw_envelope["derived"]["ocsf_event_hash"] == sysmon_result.evidence_commit["ocsf"]["hash_sha256"]
     assert security_result.raw_envelope["derived"]["ocsf_event_hash"] == security_result.evidence_commit["ocsf"]["hash_sha256"]
     assert elastic_result.raw_envelope["derived"]["ocsf_event_hash"] == elastic_result.evidence_commit["ocsf"]["hash_sha256"]
@@ -196,15 +207,15 @@ def test_evidence_hashing_regression_sysmon_windows_elastic() -> None:
     assert security_result.ocsf_event["forensics"]["raw_envelope_hash"] == security_result.evidence_commit["raw"]["envelope"]["hash_sha256"]
     assert elastic_result.ocsf_event["forensics"]["raw_envelope_hash"] == elastic_result.evidence_commit["raw"]["envelope"]["hash_sha256"]
 
-    assert sysmon_result.evidence_commit["raw"]["envelope"]["hash_sha256"] == "6ee52ed5f1c7fe1dabaa44d0781f551741fae9867728f5b20873e485ee50b96d"
+    assert sysmon_result.evidence_commit["raw"]["envelope"]["hash_sha256"] == "c3414f3357e7773e81679d237a014918caf1422c11cb4eab576fa7f2dd138451"
     assert sysmon_result.evidence_commit["raw"]["payload"]["hash_sha256"] == "148c9c0ff64e499bbce35e3b5d422f9a772c97f17630f81861b4a081438e929d"
-    assert sysmon_result.evidence_commit["ocsf"]["hash_sha256"] == "310f20d6a470f323ef2a472b2a785e8ba6259dbc56d245190ca9cff394223aeb"
-    assert security_result.evidence_commit["raw"]["envelope"]["hash_sha256"] == "b87635a60a12b0e10d8df1d837ef32e6f4ce52c52dc7ed102ed06dbc1a18561f"
+    assert sysmon_result.evidence_commit["ocsf"]["hash_sha256"] == "d3534eca890931f5656232dc5be7c679320bd1307afac14095c6ca05a7b9dd0d"
+    assert security_result.evidence_commit["raw"]["envelope"]["hash_sha256"] == "144bf615f3a1c7821c0cc87ad75924d063e6f582341ced1d596ab691f3ba0643"
     assert security_result.evidence_commit["raw"]["payload"]["hash_sha256"] == "216b4c66436f2a476d6235a0faca54c27d7039681eaae5f13aca903116a03a60"
-    assert security_result.evidence_commit["ocsf"]["hash_sha256"] == "39de6b22a801fe46303db4c61db9f7b74b68b519b0fd267cbeb364f374cf3a50"
-    assert elastic_result.evidence_commit["raw"]["envelope"]["hash_sha256"] == "b65837c0dc4f3653ebfce4473c1930d20e5254940fbbdf9e93814487f5c3c7a1"
+    assert security_result.evidence_commit["ocsf"]["hash_sha256"] == "9429e1c01a216e6778a89f4e142fafa1283e80777975caaec021229bfe79f709"
+    assert elastic_result.evidence_commit["raw"]["envelope"]["hash_sha256"] == "59111eb407eab5f6b7463b2b01674f5b599e9d91690ebe46538fba3751bb643b"
     assert elastic_result.evidence_commit["raw"]["payload"]["hash_sha256"] == "8743d406ab512cbcfc123ea427f9167c4f0df9a58d954a5c8814f9a11247a664"
-    assert elastic_result.evidence_commit["ocsf"]["hash_sha256"] == "d829afd3df4ed21573c577da1be4be035957dccbc52a6241e1f8acfcd4933d88"
+    assert elastic_result.evidence_commit["ocsf"]["hash_sha256"] == "ec648c64e5fa713695b19617083cf30b12da0e340565f4bac9e9ecd33529ea45"
 
 
 def test_envelope_and_payload_hashes_are_deterministic() -> None:

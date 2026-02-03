@@ -1301,7 +1301,7 @@ def _base_event(
     event_code = _extract_event_code(source, hit)
     index_name = hit.get("_index")
     doc_id = hit.get("_id")
-    # metadata.uid should track the source event identity, not the dedupe hash.
+    # metadata.uid is assigned after hashing to a stable OCSF event hash.
     metadata = {
         "product": {
             "name": "elastic",
@@ -1310,7 +1310,6 @@ def _base_event(
         "version": context.ocsf_version,
         "event_code": event_code,
         "original_event_uid": str(doc_id) if doc_id is not None else None,
-        "uid": str(ids.get("record_id")) if ids.get("record_id") is not None else None,
         "log_name": str(index_name) if index_name is not None else None,
         "log_source": "elastic",
         "log_format": "json",

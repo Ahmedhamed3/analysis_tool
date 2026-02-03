@@ -52,6 +52,7 @@ def _generate_uuidv7() -> Optional[str]:
 def _generate_evidence_id(raw_envelope: Dict[str, Any]) -> str:
     """
     Evidence identity is distinct from dedupe identity (restart safety).
+    UUIDv7 is preferred for evidence_id because it is unique, time-ordered, and intentionally non-deterministic.
     If UUIDv7 is unavailable, fall back to a deterministic sha256 over collector + record + observed time.
     """
     uuid_v7 = _generate_uuidv7()
@@ -171,6 +172,8 @@ def apply_evidence_hashing(
     raw_ids.setdefault("evidence_id", evidence_id)
 
     ocsf_hash = hash_sha256_hex(canonicalize_json(ocsf_copy))
+    metadata = ocsf_copy.setdefault("metadata", {})
+    metadata["uid"] = f"sha256:{ocsf_hash}"
     raw_copy.setdefault("derived", {})["ocsf_event_hash"] = ocsf_hash
     raw_copy["derived"]["ocsf_schema"] = ocsf_schema
     raw_copy["derived"]["ocsf_version"] = ocsf_version or (ocsf_copy.get("metadata") or {}).get("version")
