@@ -76,4 +76,6 @@ def class_path_for_event(event: Dict[str, Any]) -> Optional[str]:
         return "network/network_activity"
     if class_uid == 4003:
         return "network/dns_activity"
+    if class_uid == 6008:
+        return "application/application_error"
     return None
