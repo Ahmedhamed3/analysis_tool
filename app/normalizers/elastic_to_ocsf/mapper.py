@@ -38,6 +38,10 @@ def map_raw_event(raw_event: Dict[str, Any], context: MappingContext) -> Optiona
     if decision.family == "network":
         return _map_network_activity(raw_event, context, decision, missing_fields)
     if decision.family == "elastic_agent":
+        source = _extract_source(raw_event)
+        dataset = _elastic_agent_dataset(source)
+        if dataset and dataset.lower() == "elastic_agent":
+            return _map_elastic_agent_activity(raw_event, context, decision, missing_fields)
         return _map_elastic_agent_error(raw_event, context, decision, missing_fields)
     return _map_generic_activity(raw_event, context, decision, missing_fields)
 
@@ -247,6 +251,8 @@ def _detect_family(raw_event: Dict[str, Any], source: Dict[str, Any]) -> FamilyD
 def _elastic_agent_match(source: Dict[str, Any]) -> Optional[str]:
     data_stream = _get_data_stream_block(source)
     dataset = _coerce_str(data_stream.get("dataset"))
+    if dataset and dataset.lower() == "elastic_agent":
+        return f"data_stream.dataset={dataset}"
     if dataset and dataset.lower().startswith("elastic_agent."):
         return f"data_stream.dataset={dataset}"
     service_type = _coerce_str(_extract_nested_value(source, ("service", "type")))
@@ -256,6 +262,11 @@ def _elastic_agent_match(source: Dict[str, Any]) -> Optional[str]:
     if service_name and service_name.lower() == "fleet-server":
         return f"service.name={service_name}"
     return None
+
+
+def _elastic_agent_dataset(source: Dict[str, Any]) -> Optional[str]:
+    data_stream = _get_data_stream_block(source)
+    return _coerce_str(data_stream.get("dataset"))
 
 
 def _is_windows_security_privilege_use(source: Dict[str, Any]) -> bool:
@@ -355,6 +366,77 @@ def _extract_host_name(source: Dict[str, Any]) -> Optional[str]:
 def _extract_host_ip(source: Dict[str, Any]) -> Optional[str]:
     host = _get_host_block(source)
     return _coerce_str(host.get("ip"))
+
+
+def _normalize_hostname(hostname: str) -> str:
+    return hostname.lower()
+
+
+def _extract_elastic_agent_app(source: Dict[str, Any]) -> Dict[str, Any]:
+    unit_block = source.get("unit")
+    component_block = source.get("component")
+    agent_block = source.get("agent")
+    unit_id = _coerce_str(unit_block.get("id")) if isinstance(unit_block, dict) else None
+    component_id = _coerce_str(component_block.get("id")) if isinstance(component_block, dict) else None
+    agent_name = _coerce_str(agent_block.get("name")) if isinstance(agent_block, dict) else None
+    app_name = unit_id or component_id or agent_name
+    if not app_name:
+        return {}
+    app: Dict[str, Any] = {"name": app_name}
+    version = _coerce_str(_extract_nested_value(source, ("elastic_agent", "version")))
+    if version:
+        app["version"] = version
+    return app
+
+
+def _elastic_agent_lifecycle_activity_id(source: Dict[str, Any]) -> Optional[int]:
+    unit_block = source.get("unit")
+    component_block = source.get("component")
+    new_state = _coerce_str(unit_block.get("state")) if isinstance(unit_block, dict) else None
+    old_state = _coerce_str(unit_block.get("old_state")) if isinstance(unit_block, dict) else None
+    component_state = _coerce_str(component_block.get("state")) if isinstance(component_block, dict) else None
+    message = _coerce_str(source.get("message"))
+    return _map_elastic_agent_state_to_activity(new_state, old_state, component_state, message)
+
+
+def _map_elastic_agent_state_to_activity(
+    new_state: Optional[str],
+    old_state: Optional[str],
+    component_state: Optional[str],
+    message: Optional[str],
+) -> Optional[int]:
+    state = new_state or component_state
+    normalized = state.lower() if state else None
+    if normalized:
+        if normalized in {"restarting", "restart", "restarted"}:
+            return taxonomy.APPLICATION_LIFECYCLE_RESTART_ID
+        if normalized in {"starting", "start", "started", "running", "healthy", "online"}:
+            return taxonomy.APPLICATION_LIFECYCLE_START_ID
+        if normalized in {"stopping", "stop", "stopped", "failed", "dead", "exited", "inactive", "crashed"}:
+            return taxonomy.APPLICATION_LIFECYCLE_STOP_ID
+        if normalized in {"enabling", "enable", "enabled"}:
+            return taxonomy.APPLICATION_LIFECYCLE_ENABLE_ID
+        if normalized in {"disabling", "disable", "disabled"}:
+            return taxonomy.APPLICATION_LIFECYCLE_DISABLE_ID
+        if normalized in {"updating", "update", "updated"}:
+            return taxonomy.APPLICATION_LIFECYCLE_UPDATE_ID
+    if message:
+        lowered = message.lower()
+        if "restart" in lowered:
+            return taxonomy.APPLICATION_LIFECYCLE_RESTART_ID
+        if "start" in lowered:
+            return taxonomy.APPLICATION_LIFECYCLE_START_ID
+        if "stop" in lowered or "failed" in lowered:
+            return taxonomy.APPLICATION_LIFECYCLE_STOP_ID
+    if old_state and new_state:
+        old_normalized = old_state.lower()
+        new_normalized = new_state.lower()
+        if old_normalized != new_normalized:
+            if new_normalized in {"starting", "started", "running"}:
+                return taxonomy.APPLICATION_LIFECYCLE_START_ID
+            if new_normalized in {"stopping", "stopped", "failed"}:
+                return taxonomy.APPLICATION_LIFECYCLE_STOP_ID
+    return None
 
 
 def _extract_user(source: Dict[str, Any]) -> Dict[str, Any]:
@@ -652,8 +734,14 @@ def _missing_required_elastic_agent_fields(raw_event: Dict[str, Any], source: Di
     time_value = _extract_event_time(raw_event, source)
     if not time_value:
         missing.append("time")
-    if not _extract_host_name(source):
-        missing.append("host.name")
+    dataset = _elastic_agent_dataset(source)
+    if dataset and dataset.lower() == "elastic_agent":
+        app = _extract_elastic_agent_app(source)
+        if not app:
+            missing.append("unit.id/component.id/agent.name")
+        activity_id = _elastic_agent_lifecycle_activity_id(source)
+        if activity_id is None:
+            missing.append("unit.state/component.state")
     return missing
 
 
@@ -960,7 +1048,52 @@ def _map_elastic_agent_error(
         base["message"] = message
     elif fallback_message:
         base["message"] = fallback_message
+    event_code = _elastic_agent_event_code(source)
+    if event_code:
+        base["metadata"]["event_code"] = event_code
+    device = base.get("device")
+    if isinstance(device, dict) and "hostname" in device:
+        device["hostname"] = _normalize_hostname(device["hostname"])
     elastic_agent_unmapped = _build_elastic_agent_unmapped(source, message, fallback_message)
+    if elastic_agent_unmapped:
+        base["unmapped"]["elastic_agent"] = elastic_agent_unmapped
+    return base
+
+
+def _map_elastic_agent_activity(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+    decision: FamilyDecision,
+    missing_fields: list[str],
+) -> Optional[Dict[str, Any]]:
+    source = _extract_source(raw_event)
+    if missing_fields:
+        return None
+    class_uid = taxonomy.to_class_uid(taxonomy.APPLICATION_CATEGORY_UID, taxonomy.APPLICATION_LIFECYCLE_UID)
+    activity_id = _elastic_agent_lifecycle_activity_id(source)
+    if activity_id is None:
+        return None
+    base = _base_event(
+        raw_event,
+        context,
+        category_uid=taxonomy.APPLICATION_CATEGORY_UID,
+        class_uid=class_uid,
+        activity_id=activity_id,
+        mapping_attempt=_build_mapping_attempt(decision, missing_fields),
+    )
+    app = _extract_elastic_agent_app(source)
+    if app:
+        base["app"] = app
+    message = _coerce_str(source.get("message"))
+    if message:
+        base["message"] = message
+    event_code = _elastic_agent_event_code(source)
+    if event_code:
+        base["metadata"]["event_code"] = event_code
+    device = base.get("device")
+    if isinstance(device, dict) and "hostname" in device:
+        device["hostname"] = _normalize_hostname(device["hostname"])
+    elastic_agent_unmapped = _build_elastic_agent_state_unmapped(source)
     if elastic_agent_unmapped:
         base["unmapped"]["elastic_agent"] = elastic_agent_unmapped
     return base
@@ -1090,6 +1223,35 @@ def _build_elastic_agent_unmapped(
     if error_message and (not original_message or error_message != original_message):
         payload["error_message"] = error_message
     return payload
+
+
+def _build_elastic_agent_state_unmapped(source: Dict[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    unit_block = source.get("unit")
+    if isinstance(unit_block, dict):
+        unit_payload: Dict[str, Any] = {}
+        for key in ("id", "type", "state", "old_state"):
+            value = _coerce_str(unit_block.get(key))
+            if value:
+                unit_payload[key] = value
+        if unit_payload:
+            payload["unit"] = unit_payload
+    component_block = source.get("component")
+    if isinstance(component_block, dict):
+        component_payload: Dict[str, Any] = {}
+        for key in ("id", "state"):
+            value = _coerce_str(component_block.get(key))
+            if value:
+                component_payload[key] = value
+        if component_payload:
+            payload["component"] = component_payload
+    return payload
+
+
+def _elastic_agent_event_code(source: Dict[str, Any]) -> Optional[str]:
+    event_dataset = _coerce_str(_extract_nested_value(source, ("event", "dataset")))
+    data_stream_dataset = _elastic_agent_dataset(source)
+    return data_stream_dataset or event_dataset
 
 
 def _base_event(
