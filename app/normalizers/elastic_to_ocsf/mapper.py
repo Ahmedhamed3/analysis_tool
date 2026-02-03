@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Iterable, Optional
 
 from app.normalizers.elastic_to_ocsf import taxonomy
@@ -13,17 +13,31 @@ class MappingContext:
     ocsf_version: str
 
 
+@dataclass(frozen=True)
+class FamilyDecision:
+    family: str
+    reason: str
+
+
 def map_raw_event(raw_event: Dict[str, Any], context: MappingContext) -> Optional[Dict[str, Any]]:
     source = _extract_source(raw_event)
-    if _is_windows_security_privilege_use(source):
-        return _map_windows_security_privilege_use(raw_event, context)
-    if _is_authentication_event(source):
-        return _map_authentication_activity(raw_event, context)
-    if _is_process_event(source):
-        return _map_process_activity(raw_event, context)
-    if _is_network_event(source):
-        return _map_network_activity(raw_event, context)
-    return _map_generic_activity(raw_event, context)
+    decision = _detect_family(raw_event, source)
+    missing_fields = _missing_required_fields_for_family(raw_event, source, decision.family)
+    if decision.family == "iam":
+        if _is_windows_security_group_membership_enumeration(source):
+            return _map_windows_security_group_membership_enumeration(raw_event, context, decision, missing_fields)
+        if _is_windows_security_privilege_use(source):
+            return _map_windows_security_privilege_use(raw_event, context, decision, missing_fields)
+        return _map_generic_activity(raw_event, context, decision, missing_fields)
+    if decision.family == "auth":
+        return _map_authentication_activity(raw_event, context, decision, missing_fields)
+    if decision.family == "dns":
+        return _map_dns_activity(raw_event, context, decision, missing_fields)
+    if decision.family == "process":
+        return _map_process_activity(raw_event, context, decision, missing_fields)
+    if decision.family == "network":
+        return _map_network_activity(raw_event, context, decision, missing_fields)
+    return _map_generic_activity(raw_event, context, decision, missing_fields)
 
 
 def mapping_attempted(raw_event: Dict[str, Any]) -> bool:
@@ -32,15 +46,8 @@ def mapping_attempted(raw_event: Dict[str, Any]) -> bool:
 
 def missing_required_fields(raw_event: Dict[str, Any]) -> list[str]:
     source = _extract_source(raw_event)
-    if _is_windows_security_privilege_use(source):
-        return _missing_required_privilege_fields(raw_event, source)
-    if _is_authentication_event(source):
-        return _missing_required_authentication_fields(raw_event, source)
-    if _is_process_event(source):
-        return _missing_required_process_fields(raw_event, source)
-    if _is_network_event(source):
-        return _missing_required_network_fields(raw_event, source)
-    return []
+    decision = _detect_family(raw_event, source)
+    return _missing_required_fields_for_family(raw_event, source, decision.family)
 
 
 def _extract_hit(raw_event: Dict[str, Any]) -> Dict[str, Any]:
@@ -85,11 +92,42 @@ def _get_winlog_block(source: Dict[str, Any]) -> Dict[str, Any]:
     return winlog if isinstance(winlog, dict) else {}
 
 
+def _get_data_stream_block(source: Dict[str, Any]) -> Dict[str, Any]:
+    data_stream = source.get("data_stream")
+    return data_stream if isinstance(data_stream, dict) else {}
+
+
+def _get_dns_block(source: Dict[str, Any]) -> Dict[str, Any]:
+    dns = source.get("dns")
+    return dns if isinstance(dns, dict) else {}
+
+
+def _get_authentication_block(source: Dict[str, Any]) -> Dict[str, Any]:
+    authentication = source.get("authentication")
+    return authentication if isinstance(authentication, dict) else {}
+
+
+def _get_file_block(source: Dict[str, Any]) -> Dict[str, Any]:
+    file_block = source.get("file")
+    return file_block if isinstance(file_block, dict) else {}
+
+
+def _get_registry_block(source: Dict[str, Any]) -> Dict[str, Any]:
+    registry = source.get("registry")
+    return registry if isinstance(registry, dict) else {}
+
+
 def _coerce_str(value: Any) -> Optional[str]:
     if isinstance(value, str):
         stripped = value.strip()
         return stripped or None
     return None
+
+
+def _path_basename(path: str) -> str:
+    if "\\" in path:
+        return PureWindowsPath(path).name
+    return Path(path).name
 
 
 def _coerce_list(value: Any) -> list[str]:
@@ -106,6 +144,101 @@ def _contains_any(values: Iterable[str], options: Iterable[str]) -> bool:
     return any(option.lower() in lowered for option in options)
 
 
+"""
+Elastic family detection is deterministic and ordered to favor ECS intent over raw field presence:
+1) event.kind / event.category / event.type / event.action / event.outcome
+2) event.code (numeric Windows/Sysmon style IDs)
+3) data_stream.* (dataset/type/namespace)
+4) winlog.channel / winlog.provider_name
+5) ECS field presence (process/user/source/destination/dns/authentication/file/registry/network)
+The chosen family drives routing; missing fields fall back to a generic OCSF base_event while
+preserving the selected family and detection reason in unmapped.mapping_attempt.
+"""
+
+
+def _detect_family(raw_event: Dict[str, Any], source: Dict[str, Any]) -> FamilyDecision:
+    event = _get_event_block(source)
+    kind = _coerce_str(event.get("kind"))
+    categories = _coerce_list(event.get("category"))
+    types = _coerce_list(event.get("type"))
+    action = _coerce_str(event.get("action"))
+    outcome = _coerce_str(event.get("outcome"))
+    action_text = " ".join(part for part in [action, *types] if part).lower()
+
+    event_family: Optional[FamilyDecision] = None
+    if _contains_any(categories, ["authentication"]):
+        event_family = FamilyDecision("auth", "event.category=authentication")
+    elif _contains_any(categories, ["iam"]):
+        event_family = FamilyDecision("iam", "event.category=iam")
+    elif "dns" in action_text or _contains_any(types, ["dns"]):
+        event_family = FamilyDecision("dns", "event.type/action=dns")
+    elif _contains_any(categories, ["network"]):
+        event_family = FamilyDecision("network", "event.category=network")
+    elif _contains_any(categories, ["process"]):
+        event_family = FamilyDecision("process", "event.category=process")
+    elif _contains_any(categories, ["file"]):
+        event_family = FamilyDecision("file", "event.category=file")
+    elif _contains_any(categories, ["registry"]):
+        event_family = FamilyDecision("registry", "event.category=registry")
+    elif kind:
+        event_family = FamilyDecision("generic", f"event.kind={kind}")
+    elif outcome:
+        event_family = FamilyDecision("generic", f"event.outcome={outcome}")
+
+    event_code = _coerce_str(event.get("code"))
+    if event_code and event_code.isdigit():
+        if _is_windows_security_privilege_use(source) or _is_windows_security_group_membership_enumeration(source):
+            return FamilyDecision("iam", f"event.code={event_code}")
+        if event_family is None:
+            return FamilyDecision("iam", f"event.code={event_code}")
+    if event_family is not None:
+        return event_family
+
+    data_stream = _get_data_stream_block(source)
+    dataset = _coerce_str(data_stream.get("dataset"))
+    stream_type = _coerce_str(data_stream.get("type"))
+    namespace = _coerce_str(data_stream.get("namespace"))
+    if dataset:
+        lowered = dataset.lower()
+        if "dns" in lowered:
+            return FamilyDecision("dns", f"data_stream.dataset={dataset}")
+        if "network" in lowered or "flow" in lowered:
+            return FamilyDecision("network", f"data_stream.dataset={dataset}")
+        if "auth" in lowered or "login" in lowered:
+            return FamilyDecision("auth", f"data_stream.dataset={dataset}")
+        if "process" in lowered:
+            return FamilyDecision("process", f"data_stream.dataset={dataset}")
+    if stream_type:
+        if stream_type.lower() == "logs" and namespace:
+            return FamilyDecision("generic", f"data_stream.type={stream_type}")
+
+    winlog = _get_winlog_block(source)
+    channel = _coerce_str(winlog.get("channel"))
+    provider = _coerce_str(winlog.get("provider_name"))
+    if channel:
+        if channel.lower() == "security":
+            return FamilyDecision("iam", f"winlog.channel={channel}")
+        return FamilyDecision("generic", f"winlog.channel={channel}")
+    if provider:
+        return FamilyDecision("generic", f"winlog.provider_name={provider}")
+
+    if _get_dns_block(source):
+        return FamilyDecision("dns", "ecs.dns")
+    if _get_authentication_block(source):
+        return FamilyDecision("auth", "ecs.authentication")
+    if _get_network_block(source) or _extract_ip(source, "source") or _extract_ip(source, "destination"):
+        return FamilyDecision("network", "ecs.network/source/destination")
+    if _get_process_block(source):
+        return FamilyDecision("process", "ecs.process")
+    if _get_user_block(source):
+        return FamilyDecision("iam", "ecs.user")
+    if _get_file_block(source):
+        return FamilyDecision("file", "ecs.file")
+    if _get_registry_block(source):
+        return FamilyDecision("registry", "ecs.registry")
+    return FamilyDecision("generic", "fallback")
+
+
 def _is_windows_security_privilege_use(source: Dict[str, Any]) -> bool:
     event = _get_event_block(source)
     event_code = _coerce_str(event.get("code"))
@@ -116,38 +249,14 @@ def _is_windows_security_privilege_use(source: Dict[str, Any]) -> bool:
     return channel == "Security"
 
 
-def _is_authentication_event(source: Dict[str, Any]) -> bool:
+def _is_windows_security_group_membership_enumeration(source: Dict[str, Any]) -> bool:
     event = _get_event_block(source)
-    categories = _coerce_list(event.get("category"))
-    actions = [_coerce_str(event.get("action"))] + _coerce_list(event.get("type"))
-    actions = [action for action in actions if action]
-    if _contains_any(categories, ["authentication", "iam"]):
-        return True
-    return _contains_any(actions, ["login", "logon", "logout", "logoff", "authentication"])
-
-
-def _is_process_event(source: Dict[str, Any]) -> bool:
-    event = _get_event_block(source)
-    categories = _coerce_list(event.get("category"))
-    if _contains_any(categories, ["process"]):
-        return True
-    process = _get_process_block(source)
-    for key in ("pid", "name", "executable", "entity_id"):
-        if process.get(key) is not None:
-            return True
-    parent = process.get("parent")
-    return isinstance(parent, dict) and any(parent.get(key) is not None for key in ("pid", "name", "executable"))
-
-
-def _is_network_event(source: Dict[str, Any]) -> bool:
-    event = _get_event_block(source)
-    categories = _coerce_list(event.get("category"))
-    if _contains_any(categories, ["network"]):
-        return True
-    if _extract_ip(source, "source") or _extract_ip(source, "destination"):
-        network = _get_network_block(source)
-        return bool(_coerce_str(network.get("transport")) or _coerce_str(network.get("protocol")))
-    return False
+    event_code = _coerce_str(event.get("code"))
+    if event_code != "4798":
+        return False
+    winlog = _get_winlog_block(source)
+    channel = _coerce_str(winlog.get("channel"))
+    return channel == "Security"
 
 
 def _extract_event_time(raw_event: Dict[str, Any], source: Dict[str, Any]) -> Optional[str]:
@@ -246,6 +355,48 @@ def _extract_winlog_event_data(source: Dict[str, Any]) -> Dict[str, Any]:
     return event_data if isinstance(event_data, dict) else {}
 
 
+def _extract_winlog_subject_user(event_data: Dict[str, Any]) -> Dict[str, Any]:
+    name = _coerce_str(event_data.get("SubjectUserName"))
+    domain = _coerce_str(event_data.get("SubjectDomainName"))
+    uid = _coerce_str(event_data.get("SubjectUserSid"))
+    payload: Dict[str, Any] = {}
+    if name:
+        payload["name"] = name
+    if domain:
+        payload["domain"] = domain
+    if uid:
+        payload["uid"] = uid
+    return payload
+
+
+def _extract_winlog_target_user(event_data: Dict[str, Any]) -> Dict[str, Any]:
+    name = _coerce_str(event_data.get("TargetUserName")) or _coerce_str(event_data.get("UserName"))
+    domain = _coerce_str(event_data.get("TargetDomainName"))
+    uid = _coerce_str(event_data.get("TargetUserSid"))
+    payload: Dict[str, Any] = {}
+    if name:
+        payload["name"] = name
+    if domain:
+        payload["domain"] = domain
+    if uid:
+        payload["uid"] = uid
+    return payload
+
+
+def _extract_winlog_caller_process(event_data: Dict[str, Any]) -> Dict[str, Any]:
+    name = _coerce_str(event_data.get("CallerProcessName"))
+    pid = event_data.get("CallerProcessId")
+    if isinstance(pid, str) and pid.isdigit():
+        pid = int(pid)
+    payload: Dict[str, Any] = {}
+    if name:
+        payload["name"] = _path_basename(name)
+        payload["path"] = name
+    if pid is not None:
+        payload["pid"] = pid
+    return payload
+
+
 def _split_privileges(value: Optional[str]) -> list[str]:
     if not value:
         return []
@@ -270,7 +421,7 @@ def _extract_process(source: Dict[str, Any]) -> Dict[str, Any]:
     path = _coerce_str(process.get("executable"))
     name = _coerce_str(process.get("name"))
     if not name and path:
-        name = Path(path).name
+        name = _path_basename(path)
     cmd_line = _coerce_str(process.get("command_line"))
     payload: Dict[str, Any] = {}
     if pid is not None:
@@ -292,7 +443,7 @@ def _extract_process(source: Dict[str, Any]) -> Dict[str, Any]:
         parent_path = _coerce_str(parent.get("executable"))
         parent_name = _coerce_str(parent.get("name"))
         if not parent_name and parent_path:
-            parent_name = Path(parent_path).name
+            parent_name = _path_basename(parent_path)
         parent_payload: Dict[str, Any] = {}
         if parent_pid is not None:
             parent_payload["pid"] = parent_pid
@@ -341,6 +492,45 @@ def _extract_destination_endpoint(source: Dict[str, Any]) -> Dict[str, Any]:
     return endpoint
 
 
+def _extract_dns_query_name(source: Dict[str, Any]) -> Optional[str]:
+    dns = _get_dns_block(source)
+    question = dns.get("question")
+    if isinstance(question, dict):
+        name = _coerce_str(question.get("name"))
+        if name:
+            return name
+    name = _coerce_str(dns.get("question"))
+    if name:
+        return name
+    event_data = _extract_winlog_event_data(source)
+    return _coerce_str(event_data.get("QueryName")) or _coerce_str(event_data.get("Query"))
+
+
+def _extract_dns_answers(source: Dict[str, Any]) -> list[Dict[str, Any]]:
+    dns = _get_dns_block(source)
+    answers = dns.get("answers")
+    payloads: list[Dict[str, Any]] = []
+    if isinstance(answers, list):
+        for answer in answers:
+            if not isinstance(answer, dict):
+                continue
+            rdata = _coerce_str(answer.get("data")) or _coerce_str(answer.get("ip"))
+            if not rdata:
+                continue
+            entry: Dict[str, Any] = {"rdata": rdata}
+            answer_type = _coerce_str(answer.get("type"))
+            answer_class = _coerce_str(answer.get("class"))
+            ttl = answer.get("ttl")
+            if answer_type:
+                entry["type"] = answer_type
+            if answer_class:
+                entry["class"] = answer_class
+            if isinstance(ttl, int):
+                entry["ttl"] = ttl
+            payloads.append(entry)
+    return payloads
+
+
 def _missing_required_authentication_fields(raw_event: Dict[str, Any], source: Dict[str, Any]) -> list[str]:
     missing: list[str] = []
     time_value = _extract_event_time(raw_event, source)
@@ -352,10 +542,7 @@ def _missing_required_authentication_fields(raw_event: Dict[str, Any], source: D
     service_name = _coerce_str(_extract_nested_value(source, ("service", "name")))
     dst_endpoint = _extract_destination_endpoint(source)
     if not service_name and not dst_endpoint:
-        host_name = _extract_host_name(source)
-        host_ip = _extract_host_ip(source)
-        if not host_name and not host_ip:
-            missing.append("dst_endpoint/service")
+        missing.append("dst_endpoint/service")
     return missing
 
 
@@ -370,6 +557,18 @@ def _missing_required_privilege_fields(raw_event: Dict[str, Any], source: Dict[s
     privileges = _extract_privileges(source)
     if not privileges:
         missing.append("privileges")
+    return missing
+
+
+def _missing_required_group_membership_fields(raw_event: Dict[str, Any], source: Dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    time_value = _extract_event_time(raw_event, source)
+    if not time_value:
+        missing.append("time")
+    event_data = _extract_winlog_event_data(source)
+    actor = _extract_winlog_subject_user(event_data) or _extract_user(source)
+    if not actor:
+        missing.append("actor.user")
     return missing
 
 
@@ -413,22 +612,67 @@ def _missing_required_network_fields(raw_event: Dict[str, Any], source: Dict[str
     return missing
 
 
-def _map_generic_activity(raw_event: Dict[str, Any], context: MappingContext) -> Dict[str, Any]:
+def _missing_required_dns_fields(raw_event: Dict[str, Any], source: Dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    time_value = _extract_event_time(raw_event, source)
+    if not time_value:
+        missing.append("time")
+    query_name = _extract_dns_query_name(source)
+    answers = _extract_dns_answers(source)
+    if not query_name and not answers:
+        missing.append("dns.question.name")
+    return missing
+
+
+def _missing_required_fields_for_family(raw_event: Dict[str, Any], source: Dict[str, Any], family: str) -> list[str]:
+    if family == "iam":
+        if _is_windows_security_group_membership_enumeration(source):
+            return _missing_required_group_membership_fields(raw_event, source)
+        if _is_windows_security_privilege_use(source):
+            return _missing_required_privilege_fields(raw_event, source)
+        return []
+    if family == "auth":
+        return _missing_required_authentication_fields(raw_event, source)
+    if family == "dns":
+        return _missing_required_dns_fields(raw_event, source)
+    if family == "process":
+        return _missing_required_process_fields(raw_event, source)
+    if family == "network":
+        return _missing_required_network_fields(raw_event, source)
+    return []
+
+
+def _map_generic_activity(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+    decision: FamilyDecision,
+    missing_fields: list[str],
+    *,
+    unmapped_event_data: Optional[Dict[str, Any]] = None,
+    mapping_note: Optional[str] = None,
+) -> Dict[str, Any]:
     base = _base_event(
         raw_event,
         context,
         category_uid=taxonomy.OTHER_CATEGORY_UID,
         class_uid=taxonomy.BASE_EVENT_CLASS_UID,
         activity_id=0,
+        mapping_attempt=_build_mapping_attempt(decision, missing_fields),
+        unmapped_event_data=unmapped_event_data,
+        mapping_note=mapping_note,
     )
     return base
 
 
-def _map_authentication_activity(raw_event: Dict[str, Any], context: MappingContext) -> Optional[Dict[str, Any]]:
+def _map_authentication_activity(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+    decision: FamilyDecision,
+    missing_fields: list[str],
+) -> Optional[Dict[str, Any]]:
     source = _extract_source(raw_event)
-    missing_fields = _missing_required_authentication_fields(raw_event, source)
     if missing_fields:
-        return None
+        return _map_generic_activity(raw_event, context, decision, missing_fields)
     class_uid = taxonomy.to_class_uid(taxonomy.IAM_CATEGORY_UID, taxonomy.AUTHENTICATION_ACTIVITY_UID)
     activity_id = _authentication_activity_id(source)
     base = _base_event(
@@ -437,6 +681,7 @@ def _map_authentication_activity(raw_event: Dict[str, Any], context: MappingCont
         category_uid=taxonomy.IAM_CATEGORY_UID,
         class_uid=class_uid,
         activity_id=activity_id,
+        mapping_attempt=_build_mapping_attempt(decision, missing_fields),
     )
     user = _extract_user(source)
     if user:
@@ -445,11 +690,6 @@ def _map_authentication_activity(raw_event: Dict[str, Any], context: MappingCont
     if src_endpoint:
         base["src_endpoint"] = src_endpoint
     dst_endpoint = _extract_destination_endpoint(source)
-    if not dst_endpoint:
-        host_name = _extract_host_name(source)
-        host_ip = _extract_host_ip(source)
-        if host_name or host_ip:
-            dst_endpoint = {k: v for k, v in {"hostname": host_name, "ip": host_ip}.items() if v}
     if dst_endpoint:
         base["dst_endpoint"] = dst_endpoint
     service_name = _coerce_str(_extract_nested_value(source, ("service", "name")))
@@ -461,11 +701,15 @@ def _map_authentication_activity(raw_event: Dict[str, Any], context: MappingCont
     return base
 
 
-def _map_windows_security_privilege_use(raw_event: Dict[str, Any], context: MappingContext) -> Optional[Dict[str, Any]]:
+def _map_windows_security_privilege_use(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+    decision: FamilyDecision,
+    missing_fields: list[str],
+) -> Optional[Dict[str, Any]]:
     source = _extract_source(raw_event)
-    missing_fields = _missing_required_privilege_fields(raw_event, source)
     if missing_fields:
-        return None
+        return _map_generic_activity(raw_event, context, decision, missing_fields)
     class_uid = taxonomy.to_class_uid(
         taxonomy.IAM_CATEGORY_UID,
         taxonomy.AUTHORIZE_SESSION_ACTIVITY_UID,
@@ -477,6 +721,7 @@ def _map_windows_security_privilege_use(raw_event: Dict[str, Any], context: Mapp
         category_uid=taxonomy.IAM_CATEGORY_UID,
         class_uid=class_uid,
         activity_id=activity_id,
+        mapping_attempt=_build_mapping_attempt(decision, missing_fields),
     )
     user = _extract_user(source)
     if user:
@@ -492,24 +737,79 @@ def _map_windows_security_privilege_use(raw_event: Dict[str, Any], context: Mapp
     actor = _build_actor(source, None, process if process else None)
     if actor:
         base["actor"] = actor
+    status = _coerce_str(_extract_nested_value(source, ("event", "outcome")))
+    if status:
+        base["status"] = status
     return base
 
 
-def _map_process_activity(raw_event: Dict[str, Any], context: MappingContext) -> Optional[Dict[str, Any]]:
+def _map_windows_security_group_membership_enumeration(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+    decision: FamilyDecision,
+    missing_fields: list[str],
+) -> Optional[Dict[str, Any]]:
     source = _extract_source(raw_event)
-    missing_fields = _missing_required_process_fields(raw_event, source)
     if missing_fields:
-        return None
+        return _map_generic_activity(raw_event, context, decision, missing_fields)
+    class_uid = taxonomy.to_class_uid(taxonomy.IAM_CATEGORY_UID, taxonomy.ENTITY_MANAGEMENT_ACTIVITY_UID)
+    activity_id = taxonomy.ENTITY_MANAGEMENT_READ_ID
+    event_data = _extract_winlog_event_data(source)
+    actor_user = _extract_winlog_subject_user(event_data) or _extract_user(source)
+    actor_process = _extract_winlog_caller_process(event_data)
+    if not actor_process:
+        actor_process = _extract_process(source)
+    mapping_note = (
+        "Mapped to iam/entity_management (read) because OCSF taxonomy lacks a specific "
+        "group-membership-enumeration activity."
+    )
+    base = _base_event(
+        raw_event,
+        context,
+        category_uid=taxonomy.IAM_CATEGORY_UID,
+        class_uid=class_uid,
+        activity_id=activity_id,
+        mapping_attempt=_build_mapping_attempt(decision, missing_fields),
+        unmapped_event_data=_build_group_membership_unmapped(event_data),
+        mapping_note=mapping_note,
+    )
+    actor: Dict[str, Any] = {}
+    if actor_user:
+        actor["user"] = actor_user
+    if actor_process:
+        actor["process"] = actor_process
+    if actor:
+        base["actor"] = actor
+    entity_name = _coerce_str(event_data.get("GroupName")) or _coerce_str(event_data.get("Group"))
+    entity = {"name": entity_name} if entity_name else None
+    if entity:
+        base["entity"] = entity
+    status = _coerce_str(_extract_nested_value(source, ("event", "outcome")))
+    if status:
+        base["status"] = status
+    return base
+
+
+def _map_process_activity(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+    decision: FamilyDecision,
+    missing_fields: list[str],
+) -> Optional[Dict[str, Any]]:
+    source = _extract_source(raw_event)
+    if missing_fields:
+        return _map_generic_activity(raw_event, context, decision, missing_fields)
     class_uid = taxonomy.to_class_uid(taxonomy.SYSTEM_CATEGORY_UID, taxonomy.PROCESS_ACTIVITY_UID)
     activity_id = _process_activity_id(source)
     if activity_id is None:
-        return None
+        return _map_generic_activity(raw_event, context, decision, missing_fields)
     base = _base_event(
         raw_event,
         context,
         category_uid=taxonomy.SYSTEM_CATEGORY_UID,
         class_uid=class_uid,
         activity_id=activity_id,
+        mapping_attempt=_build_mapping_attempt(decision, missing_fields),
     )
     process = _extract_process(source)
     if process:
@@ -520,21 +820,26 @@ def _map_process_activity(raw_event: Dict[str, Any], context: MappingContext) ->
     return base
 
 
-def _map_network_activity(raw_event: Dict[str, Any], context: MappingContext) -> Optional[Dict[str, Any]]:
+def _map_network_activity(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+    decision: FamilyDecision,
+    missing_fields: list[str],
+) -> Optional[Dict[str, Any]]:
     source = _extract_source(raw_event)
-    missing_fields = _missing_required_network_fields(raw_event, source)
     if missing_fields:
-        return None
+        return _map_generic_activity(raw_event, context, decision, missing_fields)
     class_uid = taxonomy.to_class_uid(taxonomy.NETWORK_CATEGORY_UID, taxonomy.NETWORK_ACTIVITY_UID)
     activity_id = _network_activity_id(source)
     if activity_id is None:
-        return None
+        return _map_generic_activity(raw_event, context, decision, missing_fields)
     base = _base_event(
         raw_event,
         context,
         category_uid=taxonomy.NETWORK_CATEGORY_UID,
         class_uid=class_uid,
         activity_id=activity_id,
+        mapping_attempt=_build_mapping_attempt(decision, missing_fields),
     )
     protocol = _extract_network_protocol(source)
     base["connection_info"] = {
@@ -547,6 +852,51 @@ def _map_network_activity(raw_event: Dict[str, Any], context: MappingContext) ->
     dst_endpoint = _extract_destination_endpoint(source)
     if dst_endpoint:
         base["dst_endpoint"] = dst_endpoint
+    return base
+
+
+def _map_dns_activity(
+    raw_event: Dict[str, Any],
+    context: MappingContext,
+    decision: FamilyDecision,
+    missing_fields: list[str],
+) -> Optional[Dict[str, Any]]:
+    source = _extract_source(raw_event)
+    if missing_fields:
+        return _map_generic_activity(raw_event, context, decision, missing_fields)
+    class_uid = taxonomy.to_class_uid(taxonomy.NETWORK_CATEGORY_UID, taxonomy.DNS_ACTIVITY_UID)
+    activity_id = _dns_activity_id(source)
+    if activity_id is None:
+        return _map_generic_activity(raw_event, context, decision, missing_fields)
+    base = _base_event(
+        raw_event,
+        context,
+        category_uid=taxonomy.NETWORK_CATEGORY_UID,
+        class_uid=class_uid,
+        activity_id=activity_id,
+        mapping_attempt=_build_mapping_attempt(decision, missing_fields),
+    )
+    query_name = _extract_dns_query_name(source)
+    if query_name:
+        base["query"] = {"hostname": query_name}
+    answers = _extract_dns_answers(source)
+    if answers:
+        base["answers"] = answers
+    rcode = _coerce_str(_extract_nested_value(source, ("dns", "response_code")))
+    if rcode:
+        base["rcode"] = rcode
+    src_endpoint = _extract_source_endpoint(source)
+    if src_endpoint:
+        base["src_endpoint"] = src_endpoint
+    dst_endpoint = _extract_destination_endpoint(source)
+    if dst_endpoint:
+        base["dst_endpoint"] = dst_endpoint
+    protocol = _extract_network_protocol(source)
+    if protocol:
+        base["connection_info"] = {
+            "direction_id": taxonomy.NETWORK_DIRECTION_UNKNOWN_ID,
+            "protocol_name": protocol,
+        }
     return base
 
 
@@ -581,6 +931,23 @@ def _network_activity_id(source: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def _dns_activity_id(source: Dict[str, Any]) -> Optional[int]:
+    action = _event_action_text(source)
+    if "response" in action or "answer" in action:
+        return taxonomy.DNS_ACTIVITY_RESPONSE_ID
+    if "query" in action or "request" in action:
+        return taxonomy.DNS_ACTIVITY_QUERY_ID
+    query_name = _extract_dns_query_name(source)
+    answers = _extract_dns_answers(source)
+    if query_name and answers:
+        return taxonomy.DNS_ACTIVITY_TRAFFIC_ID
+    if query_name:
+        return taxonomy.DNS_ACTIVITY_QUERY_ID
+    if answers:
+        return taxonomy.DNS_ACTIVITY_RESPONSE_ID
+    return None
+
+
 def _event_action_text(source: Dict[str, Any]) -> str:
     event = _get_event_block(source)
     candidates = []
@@ -607,6 +974,23 @@ def _build_actor(
     return actor
 
 
+def _build_mapping_attempt(decision: FamilyDecision, missing_fields: list[str]) -> Dict[str, Any]:
+    payload = {
+        "family": decision.family,
+        "reason": decision.reason,
+    }
+    if missing_fields:
+        payload["missing_fields"] = missing_fields
+    return payload
+
+
+def _build_group_membership_unmapped(event_data: Dict[str, Any]) -> Dict[str, Any]:
+    target_user = _extract_winlog_target_user(event_data)
+    if not target_user:
+        return {}
+    return {"target_user": target_user}
+
+
 def _base_event(
     raw_event: Dict[str, Any],
     context: MappingContext,
@@ -614,6 +998,9 @@ def _base_event(
     category_uid: int,
     class_uid: int,
     activity_id: int,
+    mapping_attempt: Optional[Dict[str, Any]] = None,
+    unmapped_event_data: Optional[Dict[str, Any]] = None,
+    mapping_note: Optional[str] = None,
 ) -> Dict[str, Any]:
     hit = _extract_hit(raw_event)
     source = _extract_source(raw_event)
@@ -656,11 +1043,24 @@ def _base_event(
     }
     if device.get("hostname") or device.get("ip"):
         base["device"] = device
-    base["unmapped"] = _build_unmapped(hit, source)
+    base["unmapped"] = _build_unmapped(
+        hit,
+        source,
+        mapping_attempt=mapping_attempt,
+        unmapped_event_data=unmapped_event_data,
+        mapping_note=mapping_note,
+    )
     return base
 
 
-def _build_unmapped(hit: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+def _build_unmapped(
+    hit: Dict[str, Any],
+    source: Dict[str, Any],
+    *,
+    mapping_attempt: Optional[Dict[str, Any]] = None,
+    unmapped_event_data: Optional[Dict[str, Any]] = None,
+    mapping_note: Optional[str] = None,
+) -> Dict[str, Any]:
     elastic_block: Dict[str, Any] = {
         "_index": hit.get("_index"),
         "_id": hit.get("_id"),
@@ -668,10 +1068,14 @@ def _build_unmapped(hit: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, An
         "_source": source,
     }
     elastic_block = {key: value for key, value in elastic_block.items() if value is not None}
-    return {
-        "elastic": elastic_block,
-        "elastic_source": source,
-    }
+    payload: Dict[str, Any] = {"elastic": elastic_block}
+    if mapping_attempt:
+        payload["mapping_attempt"] = mapping_attempt
+    if unmapped_event_data:
+        payload["event_data"] = unmapped_event_data
+    if mapping_note:
+        payload["mapping_note"] = mapping_note
+    return payload
 
 
 def _map_severity_id(value: Any) -> int:
