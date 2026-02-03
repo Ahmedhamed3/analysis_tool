@@ -268,6 +268,76 @@ def test_elastic_generic_mapping_schema_valid() -> None:
     assert result.valid, result.errors
 
 
+def test_elastic_agent_dataset_mapping_schema_valid() -> None:
+    hit = {
+        "_index": "logs-elastic_agent-default",
+        "_id": "elastic-agent-1",
+        "_source": {
+            "@timestamp": "2024-06-01T11:50:00Z",
+            "data_stream": {"dataset": "elastic_agent"},
+            "log": {"level": "info"},
+            "message": "Unit state changed fleet-server (FAILED->STARTING): Starting",
+            "unit": {
+                "id": "fleet-server",
+                "type": "service",
+                "old_state": "FAILED",
+                "state": "STARTING",
+            },
+            "component": {"id": "fleet-server", "state": "STARTING"},
+            "agent": {"name": "elastic-agent-01"},
+            "elastic_agent": {"version": "8.13.0"},
+            "host": {"name": "Desktop-4URHEAC"},
+        },
+    }
+    schema_loader, context = build_context()
+    raw_event = build_raw_event(hit)
+
+    mapped = map_raw_event(raw_event, context)
+
+    assert mapped is not None
+    assert mapped["category_uid"] == 6
+    assert mapped["class_uid"] == 6002
+    assert mapped["activity_id"] == 3
+    assert mapped["type_uid"] != 0
+    assert mapped["severity_id"] == 2
+    assert mapped["app"]["name"] == "fleet-server"
+    assert mapped["app"]["version"] == "8.13.0"
+    assert mapped["device"]["hostname"] == "desktop-4urheac"
+    assert mapped["metadata"]["event_code"] == "elastic_agent"
+    assert mapped["unmapped"]["elastic_agent"]["unit"]["state"] == "STARTING"
+    assert mapped["unmapped"]["elastic_agent"]["component"]["id"] == "fleet-server"
+    class_path = class_path_for_event(mapped)
+    assert class_path == "application/application_lifecycle"
+    result = schema_loader.validate_event(mapped, class_path)
+    assert result.valid, result.errors
+
+
+def test_elastic_agent_dataset_mapping_is_deterministic() -> None:
+    schema_loader, context = build_context()
+    hit = {
+        "_index": "logs-elastic_agent-default",
+        "_id": "elastic-agent-dedupe",
+        "_source": {
+            "@timestamp": "2024-06-01T11:45:00Z",
+            "data_stream": {"dataset": "elastic_agent"},
+            "log": {"level": "info"},
+            "message": "Unit state changed fleet-server (STOPPED->STARTING): Starting",
+            "unit": {"id": "fleet-server", "state": "STARTING", "old_state": "STOPPED"},
+            "host": {"name": "Desktop-4URHEAC"},
+        },
+    }
+    raw_event = build_raw_event(hit)
+
+    first = map_raw_event(raw_event, context)
+    second = map_raw_event(raw_event, context)
+
+    assert first is not None
+    assert second is not None
+    assert first["metadata"]["uid"] == second["metadata"]["uid"]
+    results = list(convert_events([raw_event, raw_event], schema_loader=schema_loader, strict=False))
+    assert results[0][1]["record_id"] == results[1][1]["record_id"]
+
+
 def test_elastic_agent_fleet_server_error_mapping_schema_valid() -> None:
     hit = {
         "_index": "logs-elastic_agent.fleet_server-default",
@@ -332,13 +402,12 @@ def test_elastic_agent_fleet_server_mapping_is_deterministic() -> None:
 
 def test_elastic_agent_missing_required_fields_reported() -> None:
     hit = {
-        "_index": "logs-elastic_agent.fleet_server-default",
-        "_id": "fleet-missing",
+        "_index": "logs-elastic_agent-default",
+        "_id": "agent-missing",
         "_source": {
-            "data_stream": {"dataset": "elastic_agent.fleet_server"},
-            "service": {"name": "fleet-server"},
-            "log": {"level": "error"},
-            "message": "Fleet Server failed",
+            "data_stream": {"dataset": "elastic_agent"},
+            "log": {"level": "info"},
+            "message": "Unit state changed",
         },
     }
     schema_loader, _ = build_context()
@@ -352,7 +421,8 @@ def test_elastic_agent_missing_required_fields_reported() -> None:
     assert mapped is None
     assert report["status"] == "unmapped"
     assert "time" in report.get("missing_fields", [])
-    assert "host.name" in report.get("missing_fields", [])
+    assert "unit.id/component.id/agent.name" in report.get("missing_fields", [])
+    assert "unit.state/component.state" in report.get("missing_fields", [])
 
 
 def test_elastic_authentication_missing_required_fields_reported() -> None:
