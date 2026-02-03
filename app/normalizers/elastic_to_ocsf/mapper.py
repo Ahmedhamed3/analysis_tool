@@ -98,6 +98,14 @@ def _get_winlog_block(source: Dict[str, Any]) -> Dict[str, Any]:
     return winlog if isinstance(winlog, dict) else {}
 
 
+def _extract_winlog_event_id(source: Dict[str, Any]) -> Optional[str]:
+    winlog = _get_winlog_block(source)
+    event_id = winlog.get("event_id")
+    if isinstance(event_id, int):
+        return str(event_id)
+    return _coerce_str(event_id)
+
+
 def _get_data_stream_block(source: Dict[str, Any]) -> Dict[str, Any]:
     data_stream = source.get("data_stream")
     return data_stream if isinstance(data_stream, dict) else {}
@@ -127,6 +135,23 @@ def _coerce_str(value: Any) -> Optional[str]:
     if isinstance(value, str):
         stripped = value.strip()
         return stripped or None
+    return None
+
+
+def _coerce_pid(value: Any) -> Optional[int]:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if not stripped:
+            return None
+        if stripped.startswith("0x"):
+            try:
+                return int(stripped, 16)
+            except ValueError:
+                return None
+        if stripped.isdigit():
+            return int(stripped)
     return None
 
 
@@ -191,7 +216,7 @@ def _detect_family(raw_event: Dict[str, Any], source: Dict[str, Any]) -> FamilyD
     elif outcome:
         event_family = FamilyDecision("generic", f"event.outcome={outcome}")
 
-    event_code = _coerce_str(event.get("code"))
+    event_code = _coerce_str(event.get("code")) or _extract_winlog_event_id(source)
     if event_code and event_code.isdigit():
         if _is_windows_security_privilege_use(source) or _is_windows_security_group_membership_enumeration(source):
             return FamilyDecision("iam", f"event.code={event_code}")
@@ -271,7 +296,7 @@ def _elastic_agent_dataset(source: Dict[str, Any]) -> Optional[str]:
 
 def _is_windows_security_privilege_use(source: Dict[str, Any]) -> bool:
     event = _get_event_block(source)
-    event_code = _coerce_str(event.get("code"))
+    event_code = _coerce_str(event.get("code")) or _extract_winlog_event_id(source)
     if event_code != "4673":
         return False
     winlog = _get_winlog_block(source)
@@ -281,7 +306,7 @@ def _is_windows_security_privilege_use(source: Dict[str, Any]) -> bool:
 
 def _is_windows_security_group_membership_enumeration(source: Dict[str, Any]) -> bool:
     event = _get_event_block(source)
-    event_code = _coerce_str(event.get("code"))
+    event_code = _coerce_str(event.get("code")) or _extract_winlog_event_id(source)
     if event_code != "4798":
         return False
     winlog = _get_winlog_block(source)
@@ -490,9 +515,7 @@ def _extract_winlog_target_user(event_data: Dict[str, Any]) -> Dict[str, Any]:
 
 def _extract_winlog_caller_process(event_data: Dict[str, Any]) -> Dict[str, Any]:
     name = _coerce_str(event_data.get("CallerProcessName"))
-    pid = event_data.get("CallerProcessId")
-    if isinstance(pid, str) and pid.isdigit():
-        pid = int(pid)
+    pid = _coerce_pid(event_data.get("CallerProcessId"))
     payload: Dict[str, Any] = {}
     if name:
         payload["name"] = _path_basename(name)
@@ -519,9 +542,7 @@ def _extract_privileges(source: Dict[str, Any]) -> list[str]:
 
 def _extract_process(source: Dict[str, Any]) -> Dict[str, Any]:
     process = _get_process_block(source)
-    pid = process.get("pid")
-    if isinstance(pid, str) and pid.isdigit():
-        pid = int(pid)
+    pid = _coerce_pid(process.get("pid"))
     entity_id = _coerce_str(process.get("entity_id"))
     path = _coerce_str(process.get("executable"))
     name = _coerce_str(process.get("name"))
@@ -541,9 +562,7 @@ def _extract_process(source: Dict[str, Any]) -> Dict[str, Any]:
         payload["cmd_line"] = cmd_line
     parent = process.get("parent")
     if isinstance(parent, dict):
-        parent_pid = parent.get("pid")
-        if isinstance(parent_pid, str) and parent_pid.isdigit():
-            parent_pid = int(parent_pid)
+        parent_pid = _coerce_pid(parent.get("pid"))
         parent_entity = _coerce_str(parent.get("entity_id"))
         parent_path = _coerce_str(parent.get("executable"))
         parent_name = _coerce_str(parent.get("name"))
@@ -671,9 +690,15 @@ def _missing_required_group_membership_fields(raw_event: Dict[str, Any], source:
     if not time_value:
         missing.append("time")
     event_data = _extract_winlog_event_data(source)
-    actor = _extract_winlog_subject_user(event_data) or _extract_user(source)
+    actor = _extract_user(source) or _extract_winlog_subject_user(event_data)
     if not actor:
         missing.append("actor.user")
+    target_user = _extract_winlog_target_user(event_data)
+    if not target_user:
+        missing.append("target_user")
+    entity_name = _coerce_str(event_data.get("GroupName")) or _coerce_str(event_data.get("Group"))
+    if not entity_name:
+        missing.append("entity.name")
     return missing
 
 
@@ -874,11 +899,11 @@ def _map_windows_security_group_membership_enumeration(
 ) -> Optional[Dict[str, Any]]:
     source = _extract_source(raw_event)
     if missing_fields:
-        return _map_generic_activity(raw_event, context, decision, missing_fields)
+        return None
     class_uid = taxonomy.to_class_uid(taxonomy.IAM_CATEGORY_UID, taxonomy.ENTITY_MANAGEMENT_ACTIVITY_UID)
     activity_id = taxonomy.ENTITY_MANAGEMENT_READ_ID
     event_data = _extract_winlog_event_data(source)
-    actor_user = _extract_winlog_subject_user(event_data) or _extract_user(source)
+    actor_user = _extract_user(source) or _extract_winlog_subject_user(event_data)
     actor_process = _extract_winlog_caller_process(event_data)
     if not actor_process:
         actor_process = _extract_process(source)
@@ -1184,10 +1209,14 @@ def _build_mapping_attempt(decision: FamilyDecision, missing_fields: list[str]) 
 
 
 def _build_group_membership_unmapped(event_data: Dict[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
     target_user = _extract_winlog_target_user(event_data)
-    if not target_user:
-        return {}
-    return {"target_user": target_user}
+    if target_user:
+        payload["target_user"] = target_user
+    logon_id = _coerce_str(event_data.get("SubjectLogonId")) or _coerce_str(event_data.get("LogonId"))
+    if logon_id:
+        payload["logon_id"] = logon_id
+    return payload
 
 
 def _build_elastic_agent_unmapped(

@@ -163,10 +163,10 @@ def test_elastic_windows_security_4673_mapping_schema_valid() -> None:
     assert result.valid, result.errors
 
 
-def test_elastic_windows_security_4798_mapping_schema_valid() -> None:
+def test_elastic_windows_security_4798_hex_pid_mapping_schema_valid() -> None:
     hit = {
         "_index": "logs-windows.security-default",
-        "_id": "winsec-4798",
+        "_id": "winsec-4798-hex",
         "_source": {
             "@timestamp": "2024-06-01T11:53:00Z",
             "event": {
@@ -174,6 +174,7 @@ def test_elastic_windows_security_4798_mapping_schema_valid() -> None:
                 "code": "4798",
                 "outcome": "success",
             },
+            "user": {"name": "ecs-admin", "domain": "CORP", "id": "S-1-5-21-2000"},
             "winlog": {
                 "channel": "Security",
                 "event_data": {
@@ -181,10 +182,12 @@ def test_elastic_windows_security_4798_mapping_schema_valid() -> None:
                     "SubjectDomainName": "CORP",
                     "SubjectUserSid": "S-1-5-21-2000",
                     "CallerProcessName": "C:\\Windows\\System32\\net.exe",
-                    "CallerProcessId": "1234",
+                    "CallerProcessId": "0x25e0",
                     "TargetUserName": "bob",
                     "TargetDomainName": "CORP",
+                    "TargetUserSid": "S-1-5-21-3000",
                     "GroupName": "Administrators",
+                    "SubjectLogonId": "0x3e7",
                 },
             },
             "host": {"name": "win-host-02"},
@@ -201,12 +204,136 @@ def test_elastic_windows_security_4798_mapping_schema_valid() -> None:
     class_path = class_path_for_event(mapped)
     assert class_path == "iam/entity_management"
     assert "dst_endpoint" not in mapped
-    assert mapped["actor"]["user"]["name"] == "admin"
+    assert mapped["actor"]["user"]["name"] == "ecs-admin"
+    assert mapped["actor"]["process"]["pid"] == 9696
     assert mapped["actor"]["process"]["name"] == "net.exe"
+    assert mapped["actor"]["process"]["path"] == "C:\\Windows\\System32\\net.exe"
     assert mapped["entity"]["name"] == "Administrators"
     assert "mapping_note" in mapped["unmapped"]
     assert mapped["unmapped"]["event_data"]["target_user"]["name"] == "bob"
+    assert mapped["unmapped"]["event_data"]["target_user"]["domain"] == "CORP"
+    assert mapped["unmapped"]["event_data"]["target_user"]["uid"] == "S-1-5-21-3000"
+    assert mapped["unmapped"]["event_data"]["logon_id"] == "0x3e7"
     result = schema_loader.validate_event(mapped, class_path)
+    assert result.valid, result.errors
+
+
+def test_elastic_windows_security_4798_decimal_pid_mapping_schema_valid() -> None:
+    hit = {
+        "_index": "logs-windows.security-default",
+        "_id": "winsec-4798-decimal",
+        "_source": {
+            "@timestamp": "2024-06-01T11:53:30Z",
+            "event": {
+                "category": ["iam"],
+                "outcome": "success",
+            },
+            "winlog": {
+                "channel": "Security",
+                "event_id": 4798,
+                "event_data": {
+                    "SubjectUserName": "admin",
+                    "SubjectDomainName": "CORP",
+                    "SubjectUserSid": "S-1-5-21-2000",
+                    "CallerProcessName": "C:\\Windows\\System32\\net1.exe",
+                    "CallerProcessId": "4321",
+                    "TargetUserName": "bob",
+                    "TargetDomainName": "CORP",
+                    "TargetUserSid": "S-1-5-21-3000",
+                    "GroupName": "Administrators",
+                },
+            },
+            "host": {"name": "win-host-02"},
+        },
+    }
+    schema_loader, context = build_context()
+    raw_event = build_raw_event(hit)
+
+    mapped = map_raw_event(raw_event, context)
+
+    assert mapped is not None
+    assert mapped["class_uid"] == 3004
+    assert mapped["activity_id"] == 2
+    class_path = class_path_for_event(mapped)
+    assert class_path == "iam/entity_management"
+    assert mapped["actor"]["user"]["name"] == "admin"
+    assert mapped["actor"]["process"]["pid"] == 4321
+    assert mapped["actor"]["process"]["name"] == "net1.exe"
+    assert mapped["entity"]["name"] == "Administrators"
+    result = schema_loader.validate_event(mapped, class_path)
+    assert result.valid, result.errors
+
+
+def test_elastic_windows_security_4798_missing_fields_reported() -> None:
+    hit = {
+        "_index": "logs-windows.security-default",
+        "_id": "winsec-4798-missing",
+        "_source": {
+            "event": {
+                "category": ["iam"],
+                "code": "4798",
+            },
+            "user": {"name": "admin", "domain": "CORP", "id": "S-1-5-21-2000"},
+            "winlog": {
+                "channel": "Security",
+                "event_data": {
+                    "GroupName": "Administrators",
+                },
+            },
+        },
+    }
+    schema_loader, _ = build_context()
+    raw_event = build_raw_event(hit)
+    raw_event["event"]["time"] = {}
+
+    results = list(convert_events([raw_event], schema_loader=schema_loader, strict=False))
+
+    assert results
+    mapped, report = results[0]
+    assert mapped is None
+    assert report["status"] == "unmapped"
+    assert "time" in report.get("missing_fields", [])
+    assert "target_user" in report.get("missing_fields", [])
+
+
+def test_elastic_windows_security_4798_mapping_is_deterministic() -> None:
+    schema_loader, context = build_context()
+    hit = {
+        "_index": "logs-windows.security-default",
+        "_id": "winsec-4798-dedupe",
+        "_source": {
+            "@timestamp": "2024-06-01T11:53:45Z",
+            "event": {
+                "category": ["iam"],
+                "code": "4798",
+                "outcome": "success",
+            },
+            "winlog": {
+                "channel": "Security",
+                "event_data": {
+                    "SubjectUserName": "admin",
+                    "SubjectDomainName": "CORP",
+                    "SubjectUserSid": "S-1-5-21-2000",
+                    "CallerProcessName": "C:\\Windows\\System32\\net.exe",
+                    "CallerProcessId": "0x25e0",
+                    "TargetUserName": "bob",
+                    "TargetDomainName": "CORP",
+                    "GroupName": "Administrators",
+                },
+            },
+            "host": {"name": "win-host-02"},
+        },
+    }
+    raw_event = build_raw_event(hit)
+
+    first = map_raw_event(raw_event, context)
+    second = map_raw_event(raw_event, context)
+
+    assert first is not None
+    assert second is not None
+    assert first == second
+    class_path = class_path_for_event(first)
+    result = schema_loader.validate_event(first, class_path)
     assert result.valid, result.errors
 
 
